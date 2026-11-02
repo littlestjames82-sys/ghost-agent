@@ -43,6 +43,14 @@ tools — list_projects, repo_status, read_project_file — and the
 export carries it under "ecosystem" (import ignores that key: the
 registry is machine-local config, never portable data).
 
+v0.11.0 ("Ghost Intelligence") adds: GET /api/system's providers
+block gains per-profile tier fields and the System page heads it
+"Ghost Intelligence — models & routing"; POST /api/tasks accepts
+"verify": true (the Chat composer has a Verify result checkbox);
+GET /api/export-training downloads the Level 2 training dataset
+(JSONL of completed task runs, ?include_failed=1 to include
+failed ones).
+
 Auth (Hermes-style, fail-closed):
 - Loopback bind: no token needed (the v1 posture; warning banner).
 - Non-loopback bind: GHOST_AGENT_DASHBOARD_TOKEN MUST be set or the
@@ -555,6 +563,90 @@ def export_payload(store: Store) -> dict:
         "archived_approvals": store.list("archived_approvals"),
         "archived_trail": store.list("archived_trail"),
     }
+
+
+def training_jsonl(store: Store, include_failed: bool = False):
+    """The Level 2 training-data export (v0.11.0): JSONL of task
+    runs, one line per DONE task (FAILED tasks ride along only
+    with include_failed, their status marked on the line).
+
+    Each line carries what a future fine-tune needs and nothing
+    else: task_id, goal, title, provider, model, status,
+    created_at, the EXECUTED steps (tool/args/status, output
+    truncated to 2000 chars), the human approval decisions from
+    the trail ({tool, decision}), and usage_totals. It is built
+    from task records and the trail only — providers config,
+    memory and skill records, and key values can never appear.
+
+    Returns (jsonl_text, data_card): the card counts exported
+    tasks by status and by provider, plus total tokens across
+    the exported tasks."""
+    trail = store.read_trail(limit=1_000_000)
+    approvals_by_id = {a["id"]: a for a in store.list("approvals")}
+    lines: list[str] = []
+    by_status: dict[str, int] = {}
+    by_provider: dict[str, int] = {}
+    total_tokens = 0
+    for task in store.list("tasks"):
+        status = task.get("status")
+        if status != "done" and not (include_failed
+                                     and status == "failed"):
+            continue
+        steps = []
+        for s in task.get("steps", []):
+            if s.get("status") not in ("done", "failed"):
+                continue  # only steps that actually executed
+            steps.append({
+                "tool": s.get("tool"),
+                "args": s.get("args", {}),
+                "status": s.get("status"),
+                "output": ((s.get("result") or {}).get("output")
+                           or "")[:2000],
+            })
+        approvals = []
+        for e in trail:
+            if e.get("task_id") != task["id"]:
+                continue
+            if e.get("type") not in ("approval_granted",
+                                     "approval_denied"):
+                continue
+            tool = e.get("tool")
+            if not tool:
+                apr = approvals_by_id.get(
+                    (e.get("detail") or {}).get("approval_id") or "")
+                tool = apr.get("tool") if apr else None
+            if not tool:
+                idx = e.get("step_index")
+                task_steps = task.get("steps", [])
+                if isinstance(idx, int) and 0 <= idx < len(task_steps):
+                    tool = task_steps[idx].get("tool")
+            approvals.append({
+                "tool": tool,
+                "decision": "approved" if e["type"] == "approval_granted"
+                            else "denied",
+            })
+        record = {
+            "task_id": task["id"],
+            "goal": task.get("goal"),
+            "title": task.get("title"),
+            "provider": task.get("provider"),
+            "model": task.get("model"),
+            "status": status,
+            "created_at": task.get("created_at"),
+            "steps": steps,
+            "approvals": approvals,
+            "usage_totals": task.get("usage_totals"),
+        }
+        lines.append(json.dumps(record))
+        by_status[status] = by_status.get(status, 0) + 1
+        prov = task.get("provider") or "unknown"
+        by_provider[prov] = by_provider.get(prov, 0) + 1
+        total_tokens += (task.get("usage_totals")
+                         or {}).get("total_tokens", 0)
+    card = {"tasks": len(lines), "by_status": by_status,
+            "by_provider": by_provider, "total_tokens": total_tokens}
+    text = "\n".join(lines)
+    return (text + "\n") if text else "", card
 
 
 # ---- safe import (v0.6.0) -------------------------------------------------
@@ -1219,6 +1311,7 @@ body.compact .tile{flex-basis:34px;width:34px;height:34px}
  <form id="chat-form" class="composer">
   <input id="chat-input" placeholder="Message Ghost Agent..." autocomplete="off" required>
   <select id="chat-profile" title="Provider profile for this task (blank: the router strategy decides)"></select>
+  <label class="small" title="After the task finishes, the same provider judges the deliverable against the goal; the verdict is recorded on the task"><input type="checkbox" id="chat-verify"> Verify result</label>
   <button type="submit">Send</button>
  </form>
 </section>
@@ -1967,11 +2060,12 @@ async function refresh(){
     "<dt>Local-only warning</dt><dd>"+esc(sys.warning)+"</dd></dl>";
   const pv=sys.providers||null;
   if(pv){
-    sh+="<div class='seclabel'>Model providers</div>";
+    sh+="<div class='seclabel'>Ghost Intelligence — models & routing</div>";
     if(pv.load_error) sh+="<p class='small'>providers.json could not be loaded ("+esc(pv.load_error)+") - routing falls back to the legacy env profile.</p>";
     sh+="<p class='small'>Strategy <b>"+esc(pv.strategy)+"</b> - default profile <b>"+esc(pv.default||"(none - legacy env)")+"</b>"+((pv.chain&&pv.chain.length)?" - chain: "+pv.chain.map(esc).join(" &rarr; "):"")+"</p>";
     sh+="<dl>"+Object.entries(pv.profiles||{}).map(([n,p])=>
       "<dt>"+esc(n)+"</dt><dd>"+esc(p.model)+" <span class='pill'>"+esc(p.kind)+"</span> "+
+      (p.tier?"<span class='pill'>tier: "+esc(p.tier)+"</span>":"")+" "+
       (p.configured?"<span class='pill'>configured</span>":"<span class='pill'>not configured</span>")+" "+
       (p.api_key_env?(p.key_present?"<span class='pill'>key present: "+esc(p.api_key_env)+"</span>":"<span class='pill'>key missing: "+esc(p.api_key_env)+"</span>"):"<span class='pill'>keyless (local)</span>")+
       "<br><span class='small'>"+esc(p.base_url)+"</span></dd>").join("")+"</dl>";
@@ -2003,7 +2097,9 @@ async function refresh(){
     "<dt>Skills</dt><dd>"+ov.skills_total+"</dd>"+
     "<dt>Schedules</dt><dd>"+lastSchedules.length+"</dd>"+
     "<dt>Trail events</dt><dd>"+ov.trail_events+"</dd></dl>"+
-    "<p><a href='/api/export'><button type='button' class='ghostbtn small'>Download state export (JSON)</button></a></p></div>";
+    "<p><a href='/api/export'><button type='button' class='ghostbtn small'>Download state export (JSON)</button></a> "+
+    "<a href='/api/export-training'><button type='button' class='ghostbtn small'>Download training data (JSONL)</button></a></p>"+
+    "<p class='small'>Training data is the Level 2 on-ramp: one JSON line per completed task run (goal, provider, executed steps, approval decisions, usage). Add ?include_failed=1 to the training URL to include failed runs.</p></div>";
   sh+="<div class='seclabel'>Import state</div><div id='sys-import'>"+
     "<p class='small'>Import a Ghost Agent export JSON. Safety rules: imported memories and skills arrive as <b>candidates only</b> (never trusted), schedules arrive <b>disabled</b>, and tasks, approvals, and trail are kept as <b>archived history</b> that is never re-run. Existing records are never overwritten; duplicate ids are re-minted.</p>"+
     "<p><input type='file' id='import-file' accept='application/json,.json'> "+
@@ -2048,6 +2144,7 @@ document.getElementById("chat-form").addEventListener("submit",async e=>{
   document.getElementById("chat-input").value="";
   const prof=document.getElementById("chat-profile").value;
   const payload={goal:g}; if(prof) payload.profile=prof;
+  if(document.getElementById("chat-verify").checked) payload.verify=true;
   try{ const r=await j("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     if(r&&r.task){ chatTaskId=r.task.id; flash("chat-status","Task created - running");
       document.getElementById("chat-picker").value=chatTaskId; loadChatThread(); }
@@ -2179,6 +2276,20 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                     200, export_payload(store),
                     headers={"Content-Disposition":
                              'attachment; filename="ghost-agent-export.json"'})
+            if path == "/api/export-training":
+                # The Level 2 dataset (v0.11.0): JSONL of done
+                # task runs (failed ones only with the flag).
+                qs = parse_qs(parsed.query)
+                include_failed = (qs.get("include_failed")
+                                  or [""])[0].lower() in ("1", "true",
+                                                          "yes")
+                text, _card = training_jsonl(
+                    store, include_failed=include_failed)
+                return self._send(
+                    200, text, "application/x-ndjson; charset=utf-8",
+                    headers={"Content-Disposition":
+                             'attachment; filename='
+                             '"ghost-agent-training.jsonl"'})
             if path == "/api/memory":
                 mem = Memory(store)
                 return self._send(200, {"trusted": mem.list_trusted(),
@@ -2217,11 +2328,13 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                     return self._send(400, {"error": "goal is required"})
                 # Optional per-task provider override (v0.10.0):
                 # an unknown or unconfigured profile name is a
-                # 400, never a silent substitution.
+                # 400, never a silent substitution. "verify"
+                # (v0.11.0) opts the task into the verifier pass.
                 try:
                     task = agent.create_task(
                         goal, title=data.get("title"),
-                        profile=data.get("profile") or None)
+                        profile=data.get("profile") or None,
+                        verify=bool(data.get("verify")))
                 except ValueError as exc:
                     return self._send(400, {"error": str(exc)})
                 task = agent.run_task(task["id"])

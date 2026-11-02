@@ -1,9 +1,10 @@
-"""CLI: python -m ghost_agent demo|serve|tasks|approve|deny|memory|skills|schedules|schedule-add|schedule-remove"""
+"""CLI: python -m ghost_agent demo|serve|tasks|approve|deny|memory|skills|schedules|schedule-add|schedule-remove|export-training"""
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from .agent import Agent
 from .memory import Memory
@@ -19,8 +20,10 @@ def _agent() -> tuple[Store, Agent]:
 def cmd_demo(args) -> int:
     store, agent = _agent()
     try:
-        task = agent.create_task("demo", title="Ghost Agent demo",
-                                 profile=getattr(args, "profile", None))
+        task = agent.create_task(
+            "demo", title="Ghost Agent demo",
+            profile=getattr(args, "profile", None),
+            verify=getattr(args, "verify", False))
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -31,6 +34,10 @@ def cmd_demo(args) -> int:
         print(f"approval requested: {pending[0]['tool']} (demo approves it, as a human would)")
         task = agent.approve_task(task["id"])
     print(f"task {task['id']}: final -> {task['status']}")
+    if task.get("verification"):
+        v = task["verification"]
+        print(f"verification: {v.get('outcome')}"
+              + (f" ({v.get('reason')})" if v.get("reason") else ""))
     print("steps:")
     for i, s in enumerate(task["steps"]):
         print(f"  {i}. {s['tool']}: {s['status']}")
@@ -121,6 +128,39 @@ def cmd_schedule_remove(args) -> int:
     return 2
 
 
+def cmd_export_training(args) -> int:
+    """The Level 2 on-ramp (v0.11.0): write the training-data
+    JSONL (done task runs; failed ones only with --include-failed)
+    and print the data card — counts by status and provider, and
+    total tokens across the exported tasks. Without --out the
+    JSONL goes to stdout and the card to stderr, so the JSONL
+    stays pipe-clean."""
+    from .server import training_jsonl
+    store = Store()
+    text, card = training_jsonl(store,
+                                include_failed=args.include_failed)
+    card_lines = [
+        f"training export: {card['tasks']} task(s)",
+        "  by status: " + (", ".join(
+            f"{k}={v}" for k, v in sorted(card["by_status"].items()))
+            or "(none)"),
+        "  by provider: " + (", ".join(
+            f"{k}={v}" for k, v in sorted(card["by_provider"].items()))
+            or "(none)"),
+        f"  total tokens: {card['total_tokens']}",
+    ]
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"wrote {args.out}")
+        for line in card_lines:
+            print(line)
+    else:
+        sys.stdout.write(text)
+        for line in card_lines:
+            print(line, file=sys.stderr)
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .server import DashboardConfigError, serve
     try:
@@ -137,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     p_demo.add_argument("--profile", default=None,
                         help="provider profile for the task (providers.json); "
                              "default: the router strategy decides")
+    p_demo.add_argument("--verify", action="store_true",
+                        help="run the verifier pass when the task "
+                             "finishes (recorded on the task; a "
+                             "MockModel demo records a skip)")
     p_serve = sub.add_parser("serve", help="run the dashboard server")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8770)
@@ -158,12 +202,20 @@ def main(argv: list[str] | None = None) -> int:
     p_sa.add_argument("--title", default=None)
     p_sr = sub.add_parser("schedule-remove", help="delete a schedule")
     p_sr.add_argument("schedule_id")
+    p_et = sub.add_parser(
+        "export-training",
+        help="export completed task runs as training-data JSONL")
+    p_et.add_argument("--out", default=None,
+                      help="write the JSONL to this path (default: stdout)")
+    p_et.add_argument("--include-failed", action="store_true",
+                      help="include failed task runs (status marked)")
     args = parser.parse_args(argv)
     fn = {"demo": cmd_demo, "serve": cmd_serve, "tasks": cmd_tasks,
           "approve": cmd_approve, "deny": cmd_deny,
           "memory": cmd_memory, "skills": cmd_skills,
           "schedules": cmd_schedules, "schedule-add": cmd_schedule_add,
-          "schedule-remove": cmd_schedule_remove}[args.cmd]
+          "schedule-remove": cmd_schedule_remove,
+          "export-training": cmd_export_training}[args.cmd]
     return fn(args)
 
 

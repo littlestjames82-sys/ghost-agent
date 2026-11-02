@@ -440,6 +440,9 @@ Three fixes from the Nov 2 live gauntlet and ecosystem probes:
     known pricing in the built-in table, the lowest (input +
     output) per-million sum serves; if no configured profile
     is priced, it behaves as `default`.
+  * `best` (v0.11.0) — among configured profiles, the highest
+    *tier* serves (see Ghost Intelligence below); if none are
+    configured, it behaves as `default`.
 
   In every strategy, a mid-task provider failure still fails
   the task — brains never switch mid-task — and
@@ -465,6 +468,93 @@ Three fixes from the Nov 2 live gauntlet and ecosystem probes:
   $1.00/$5.00 per million (Anthropic's published list
   prices); every other unpriced model stays cost `unknown`,
   as before.
+
+## Ghost Intelligence (v0.11.0)
+
+Ghost Intelligence is the name for this runtime's brain: the
+router, plus what the router's planner gets to know and how its
+work is checked. It has three levels, by design:
+
+* **Level 1 — shipped.** The multi-model router (v0.10.0:
+  profiles, strategies, per-task override, attribution), plus
+  the three additions below.
+* **Level 2 — the on-ramp is shipped; training is later.** The
+  training-data export (below) turns governed runs into a
+  curated dataset FIRST, because a dataset is the asset every
+  later step stands on. That is the Ghost Hands precedent: its
+  on-device planner was trained from a curated dataset of
+  examples (718 of them), not by pointing a trainer at raw
+  logs. When a fine-tune happens, it trains on exports like
+  this one — successful, human-approved runs with their
+  approval decisions attached.
+* **Level 3 — parked by decision.** A foundation model of our
+  own is a long-term research direction, not a roadmap item;
+  nothing in this build pretends otherwise.
+
+The v0.11.0 additions:
+
+* **Memory-informed planning.** When a task is created, the
+  agent selects TRUSTED memories whose text shares keyword
+  overlap with the goal (tokenized on non-alphanumerics,
+  stopwords and short tokens dropped, scored by distinct
+  shared tokens; top 5). Their texts ride in EVERY planner
+  prompt for the task under "Relevant memory (trusted,
+  user-approved):". The chosen ids are stored on the task
+  (`memory_context`) and one `memory_recalled` trail event
+  records the recall. CANDIDATE memories never reach a
+  prompt — untrusted text does not steer the planner.
+* **Skill hints.** The same pass selects TRUSTED skills (top
+  2) whose name or source goal overlaps the goal, and the
+  prompt gains "Relevant skill '<name>' (trusted): a previous
+  successful run used these tools in order: …". It is a hint,
+  not a script — the planner may deviate. Candidate skills
+  never hint. Ids ride on the task (`skill_hints`) with one
+  `skill_hinted` trail event.
+* **Verifier pass (opt-in).** `create_task(verify=True)`,
+  `POST /api/tasks {"verify": true}`, `ghost-agent demo
+  --verify`, or the Chat page's "Verify result" checkbox. When
+  such a task reaches done, the SAME provider that ran it
+  makes ONE extra call judging the deliverable — the files
+  its write steps produced, read back from the workspace (or
+  the step outputs when it wrote none) — against the goal,
+  demanding a strict JSON verdict. The record lands on the
+  task (`verification`) and in the trail: `grounded`,
+  `issues` (with the issues list verbatim), `unparseable`,
+  or `error`. A MockModel-owned task records
+  `{"outcome": "skipped", "reason": "mock model"}` and makes
+  no call. The verdict NEVER changes the task's status — it
+  is evidence, not a gate — and its token usage is recorded
+  like any other call (with `over_budget: true` noted if that
+  usage carries the task past its token budget after the
+  work was already done).
+* **Tier-aware routing.** Profiles carry an optional `tier`:
+  `frontier`, `standard`, or `small` (presets: Meta and
+  Anthropic frontier; OpenAI, OpenRouter, Fireworks, Groq,
+  Together, Gemini standard; Ollama and LM Studio small). A
+  profile's *effective* tier is its own valid tier, else the
+  preset tier for its name, else none — so a `providers.json`
+  written before tiers existed still ranks correctly, and
+  the file is never rewritten to add them. An invalid tier
+  value is ignored for selection but shown raw in
+  `/api/system` (`tier_configured`, beside the effective
+  `tier`). The new `best` strategy serves the highest-tier
+  configured profile (ties break by the file's profile
+  order); an unknown strategy string behaves as `default`.
+* **Training-data export.** `GET /api/export-training`
+  (add `?include_failed=1` for failed runs) or
+  `ghost-agent export-training [--out PATH]
+  [--include-failed]` emits JSONL: one line per completed
+  task run with its goal, provider, model, status, the
+  executed steps (output truncated to 2000 chars), the
+  human approval decisions recovered from the trail, and
+  usage totals. The CLI also prints a data card (counts by
+  status and provider, total tokens). The export is built
+  from task records and the trail only — no providers
+  config, no memory or skill records, no key values.
+
+The dashboard's System page heads this whole block "Ghost
+Intelligence — models & routing", with each profile's tier
+shown as a pill.
 
 ## Honest limits
 
@@ -505,6 +595,7 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7b.py -v  # v7b live-fi
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v8.py -v   # v8 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v9.py -v   # v9 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v10.py -v  # v10 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v11.py -v  # v11 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
@@ -516,8 +607,9 @@ See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6),
 [BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7),
 [BUILD_REPORT_V8.md](BUILD_REPORT_V8.md) (v8),
-[BUILD_REPORT_V9.md](BUILD_REPORT_V9.md) (v9), and
-[BUILD_REPORT_V10.md](BUILD_REPORT_V10.md) (v10) for gate results
+[BUILD_REPORT_V9.md](BUILD_REPORT_V9.md) (v9),
+[BUILD_REPORT_V10.md](BUILD_REPORT_V10.md) (v10), and
+[BUILD_REPORT_V11.md](BUILD_REPORT_V11.md) (v11) for gate results
 and counts.
 
 ## Design language (v0.5.0)

@@ -34,14 +34,26 @@ spend, and only provider spend.
 Record-before-execute is a hard rule: the trail record for a tool
 execution is written (flush + fsync) BEFORE the tool runs. If that
 write fails, the action does NOT execute and the run fails honestly.
+
+Ghost Intelligence (v0.11.0): at creation, a task selects the
+TRUSTED memories and TRUSTED skills whose text overlaps its goal
+(keyword scoring, deterministic) and carries their texts in every
+planner prompt — candidates never reach a prompt. A task created
+with verify=True gets, once it reaches done, ONE extra call
+through the same provider that ran it, judging the deliverable
+against the goal; the verdict is recorded as evidence and never
+changes the task's status.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
 
 from . import governance
 from .ecosystem import get_ecosystem
+from .memory import Memory
 from .models import ModelError, Router
 from .providers import get_providers
 from .skills import Skills
@@ -55,6 +67,40 @@ HISTORY_TOTAL_CHARS = 40000   # total history budget, outputs elided first
 STEP_OUTPUT_CHARS = 8000      # per-step output stored on the task record
 TOKEN_BUDGET_ENV = "GHOST_AGENT_TOKEN_BUDGET"
 DEFAULT_TOKEN_BUDGET = 100_000  # per-task provider tokens, when unset
+
+# ---- Ghost Intelligence recall (v0.11.0) ----------------------------------
+# Keyword overlap between a goal and trusted memory / skill text.
+# Deliberately simple and deterministic: tokenized on
+# non-alphanumerics, lowercased, stopwords and tokens shorter
+# than 3 chars dropped; the score is the count of DISTINCT shared
+# tokens. No embeddings, no model call — the recall must be
+# explainable from the record alone.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "into", "that", "this",
+    "these", "those", "then", "than", "such", "all", "any", "each",
+    "per", "via", "about", "over", "under", "after", "before",
+    "when", "while", "what", "which", "who", "how", "why", "can",
+    "could", "should", "would", "will", "shall", "may", "might",
+    "must", "not", "but", "also", "just", "only", "very", "more",
+    "most", "other", "some", "them", "they", "their", "there",
+    "here", "out", "again", "once", "twice", "you", "your",
+    "yours", "our", "its", "are", "was", "were", "been", "does",
+    "did", "please",
+})
+MEMORY_CONTEXT_LIMIT = 5   # trusted memories per task
+SKILL_HINT_LIMIT = 2       # trusted skills per task
+
+
+def _content_tokens(text) -> set:
+    """The meaningful tokens of a text, for overlap scoring."""
+    return {t for t in _TOKEN_RE.findall((text or "").lower())
+            if len(t) >= 3 and t not in _STOPWORDS}
+
+
+def _overlap(goal_tokens: set, text) -> int:
+    """Distinct shared tokens between the goal and a text."""
+    return len(goal_tokens & _content_tokens(text))
 
 
 def configured_token_budget() -> int | None:
@@ -209,9 +255,81 @@ class Agent:
             out.pop(0)
         return out
 
+    # ---- Ghost Intelligence recall (v0.11.0) ------------------------------
+    def _select_context(self, goal: str) -> tuple[list, list]:
+        """Choose the trusted memories and trusted skills a new
+        task's planner should see, by keyword overlap with the
+        goal. TRUSTED records only — candidates are untrusted by
+        definition and never reach a prompt. Returns (memory_ids,
+        skill_ids), each ordered by score descending, then store
+        order, capped (5 memories, 2 skills)."""
+        goal_tokens = _content_tokens(goal)
+        scored_mem: list[tuple[int, int, str]] = []
+        for idx, mem in enumerate(Memory(self.store).list_trusted()):
+            score = _overlap(goal_tokens, mem.get("text"))
+            if score >= 1:
+                scored_mem.append((-score, idx, mem["id"]))
+        scored_mem.sort()
+        memory_ids = [mid for _, _, mid in scored_mem[:MEMORY_CONTEXT_LIMIT]]
+        scored_skills: list[tuple[int, int, str]] = []
+        for idx, skill in enumerate(self.skills.list_trusted()):
+            # Match against the skill's name and, when resolvable,
+            # its source goal: the record itself (a "goal" field
+            # if one was stored) or the task it was proposed from.
+            texts = [skill.get("name") or "", skill.get("goal") or ""]
+            src = self.store.get("tasks", skill.get("from_task") or "")
+            if src is not None:
+                texts.append(src.get("goal") or "")
+            score = max((_overlap(goal_tokens, t) for t in texts),
+                        default=0)
+            if score >= 1:
+                scored_skills.append((-score, idx, skill["id"]))
+        scored_skills.sort()
+        skill_ids = [sid for _, _, sid
+                     in scored_skills[:SKILL_HINT_LIMIT]]
+        return memory_ids, skill_ids
+
+    def _render_context(self, memory_ids: list, skill_ids: list) -> str:
+        """Render selected recall as planner-prompt context.
+        Records are re-read by id (trusted lists only), so a
+        record that has since left the trusted set drops out
+        instead of leaking. Empty selection -> empty string ->
+        the prompt is byte-identical to the pre-v0.11.0 shape."""
+        blocks: list[str] = []
+        if memory_ids:
+            trusted = {m["id"]: m
+                       for m in Memory(self.store).list_trusted()}
+            lines = [f"- {trusted[mid].get('text', '')}"
+                     for mid in memory_ids if mid in trusted]
+            if lines:
+                blocks.append(
+                    "Relevant memory (trusted, user-approved):\n"
+                    + "\n".join(lines))
+        if skill_ids:
+            trusted = {s["id"]: s for s in self.skills.list_trusted()}
+            for sid in skill_ids:
+                skill = trusted.get(sid)
+                if skill is None:
+                    continue
+                tools_seq = skill.get("tools") or [
+                    step.get("tool") for step in skill.get("steps") or []
+                    if step.get("tool")]
+                blocks.append(
+                    f"Relevant skill '{skill.get('name')}' (trusted): "
+                    "a previous successful run used these tools in "
+                    "order: " + " -> ".join(tools_seq))
+        return "\n".join(blocks)
+
+    def _planning_context(self, task: dict) -> str:
+        """The prompt context for a task, from the ids selected
+        at creation (stored on the task record)."""
+        return self._render_context(task.get("memory_context") or [],
+                                    task.get("skill_hints") or [])
+
     # ---- task creation ---------------------------------------------------
     def create_task(self, goal: str, title: str | None = None,
-                    profile: str | None = None) -> dict:
+                    profile: str | None = None,
+                    verify: bool = False) -> dict:
         # Per-task provider override (v0.10.0): the name must be a
         # profile the registry holds AND one that can serve. An
         # unknown or unconfigured name is an honest creation
@@ -229,11 +347,19 @@ class Agent:
                 raise ValueError(
                     f"provider profile is not configured: {profile} "
                     f"({entry.get('api_key_env')} is not set)")
+        # Ghost Intelligence recall (v0.11.0): select the trusted
+        # memories and skills this goal overlaps, BEFORE the
+        # first call, so the very first planner prompt already
+        # carries them. The ids are stored on the task; every
+        # later prompt re-renders from them.
+        memory_ids, skill_ids = self._select_context(goal)
+        context = self._render_context(memory_ids, skill_ids)
         # The task's first next-step call. This is the ONLY call
         # that may fall back to MockModel (Router policy); its
         # outcome fixes the task's brain for its whole life.
         first = self.router.next_step(goal, [], brain=None,
-                                      provider=profile)
+                                      provider=profile,
+                                      context=context or None)
         steps = []
         if first["step"] is not None:
             steps.append(self._step_record(first["step"]))
@@ -253,6 +379,12 @@ class Agent:
             "fallback_reason": first["fallback_reason"],
             "skill_id": None,
             "error": None,
+            # Ghost Intelligence (v0.11.0): the recall selected
+            # for this task (ids into the trusted stores), and
+            # whether the opt-in verifier pass runs at the end.
+            "memory_context": memory_ids,
+            "skill_hints": skill_ids,
+            "verify": bool(verify),
             # v0.7.0 loop state.
             "planning_done": bool(first["done"]),
             "plan_calls": 1,
@@ -298,6 +430,18 @@ class Agent:
                                  task_id=task["id"])
         self.store.try_trail("task_created", {"goal": goal},
                              task_id=task["id"])
+        # Recall is recorded ONCE, at first use (the creation
+        # call above), and only when something was recalled — a
+        # task with no matches leaves the trail exactly as
+        # before (the fresh-home CLI demo stays at 19 events).
+        if memory_ids:
+            self.store.try_trail("memory_recalled",
+                                 {"memory_ids": memory_ids},
+                                 task_id=task["id"])
+        if skill_ids:
+            self.store.try_trail("skill_hinted",
+                                 {"skill_ids": skill_ids},
+                                 task_id=task["id"])
         if budget_failed:
             self.store.try_trail(
                 "budget_exceeded",
@@ -558,10 +702,12 @@ class Agent:
             self.store.try_trail("replan", {"iteration": iteration},
                                  task_id=task_id)
             try:
-                nxt = self.router.next_step(task["goal"],
-                                            self._history(task),
-                                            brain=task.get("model"),
-                                            provider=task.get("provider"))
+                nxt = self.router.next_step(
+                    task["goal"],
+                    self._history(task),
+                    brain=task.get("model"),
+                    provider=task.get("provider"),
+                    context=self._planning_context(task) or None)
             except ModelError as exc:
                 # Mid-task provider failure: fail honestly. The
                 # brain never changes mid-task.
@@ -630,5 +776,157 @@ class Agent:
         skill = self.skills.propose_from_run(task)
         task = self.store.update("tasks", task_id, skill_id=skill["id"])
         self.store.try_trail("task_done", {"skill_id": skill["id"]},
+                             task_id=task_id)
+        # The opt-in verifier pass (v0.11.0): evidence about the
+        # result, recorded on the task — it never reopens or
+        # changes the done status it just earned.
+        if task.get("verify"):
+            task = self._run_verification(task)
+        return task
+
+    # ---- verifier pass (v0.11.0) -------------------------------------------
+    def _deliverable(self, task: dict) -> str:
+        """What the verifier judges: the current workspace
+        contents of every file the task's executed write_file /
+        append_file steps targeted (each capped at 4000 chars,
+        the whole at 12000). When the task wrote no files, the
+        executed steps' outputs, joined and capped."""
+        seen: list[str] = []
+        for step in task.get("steps", []):
+            if step.get("status") != "done":
+                continue
+            if step.get("tool") in ("write_file", "append_file"):
+                path = (step.get("args") or {}).get("path")
+                if path and path not in seen:
+                    seen.append(path)
+        parts: list[str] = []
+        for path in seen:
+            try:
+                content = self.tools._resolve(path).read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            parts.append(f"--- {path} ---\n{content[:4000]}")
+        if parts:
+            return "\n".join(parts)[:12000]
+        outputs = [((s.get("result") or {}).get("output") or "")
+                   for s in task.get("steps", [])
+                   if s.get("status") == "done"]
+        return "\n".join(o for o in outputs if o)[:12000]
+
+    @staticmethod
+    def _parse_verdict(text) -> dict | None:
+        """The verifier's strict-JSON verdict, parsed with the
+        same lenient extraction the step parsers use (first '{',
+        raw_decode). Returns {"grounded": bool, "issues": [...]}
+        or None when the reply carries no usable verdict."""
+        if not isinstance(text, str) or not text.strip():
+            return None
+        start = text.find("{")
+        if start == -1:
+            return None
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text[start:])
+        except ValueError:
+            return None
+        if not isinstance(obj, dict) \
+                or not isinstance(obj.get("grounded"), bool):
+            return None
+        issues = obj.get("issues")
+        if not isinstance(issues, list):
+            issues = []
+        return {"grounded": obj["grounded"],
+                "issues": [str(i) for i in issues]}
+
+    def _run_verification(self, task: dict) -> dict:
+        """Judge a done task's deliverable against its goal with
+        ONE extra call through the SAME provider that ran the
+        task. The outcome is recorded on the task (field
+        `verification`) and in the trail; the task's status is
+        never changed by it. A MockModel-owned task is skipped
+        with the reason recorded — the mock cannot judge, and no
+        call is made."""
+        task_id = task["id"]
+        provider = task.get("provider")
+        if provider == "mock" or task.get("model") == "mock":
+            record = {"outcome": "skipped", "reason": "mock model"}
+            task = self.store.update("tasks", task_id,
+                                     verification=record)
+            self.store.try_trail("verification", dict(record),
+                                 task_id=task_id)
+            return task
+        # The verifier judges against everything the planner
+        # legitimately had, not the goal alone: the SAME trusted
+        # memory / skill context rendered into the planner's
+        # prompts (re-resolved from the task's stored ids, so a
+        # record that left the trusted set drops out here too)
+        # rides along, labeled. Without it, a deliverable grounded
+        # in recalled memory reads as invented fact and draws a
+        # false "issues" verdict (found by a live probe). The
+        # section is omitted entirely when the task had no
+        # recalled context, keeping that prompt shape unchanged.
+        context = self._planning_context(task)
+        context_section = ""
+        grounding_note = ""
+        if context:
+            context_section = (
+                "\nContext the planner was given (trusted memory "
+                "and skills):\n" + context + "\n")
+            grounding_note = (
+                " Claims traceable to the context the planner "
+                "was given count as grounded.")
+        prompt = (
+            "You are verifying a completed task. Judge whether "
+            "the deliverable actually achieves the goal and is "
+            "grounded in real content (not placeholders, filler, "
+            "or invented facts)." + grounding_note + "\n"
+            f"Goal: {task.get('goal')}\n"
+            f"{context_section}\n"
+            f"Deliverable:\n{self._deliverable(task)}\n\n"
+            "Reply with ONLY a JSON object: {\"grounded\": true "
+            "or false, \"issues\": [\"...\", ...]}. Use an empty "
+            "issues list when grounded is true."
+        )
+        try:
+            res = self.router.complete(prompt, brain=task.get("model"),
+                                       provider=provider)
+        except ModelError as exc:
+            record = {"outcome": "error", "issues": [],
+                      "provider": provider}
+            task = self.store.update("tasks", task_id,
+                                     verification=record)
+            self.store.try_trail(
+                "verification", {**record, "error": str(exc)},
+                task_id=task_id)
+            return task
+        # The verifier's usage is recorded like any other call.
+        if res.get("usage") is not None:
+            self._apply_usage(task, res["usage"])
+            task = self.store.update(
+                "tasks", task_id,
+                usage_totals=task["usage_totals"],
+                usage_by_model=task["usage_by_model"],
+                usage_source=task["usage_source"])
+            self.store.try_trail("model_usage", dict(res["usage"]),
+                                 task_id=task_id)
+        verdict = self._parse_verdict(res.get("text"))
+        if verdict is None:
+            record = {"outcome": "unparseable", "issues": [],
+                      "provider": provider}
+        elif verdict["grounded"]:
+            record = {"outcome": "grounded",
+                      "issues": verdict["issues"],
+                      "provider": provider}
+        else:
+            record = {"outcome": "issues",
+                      "issues": verdict["issues"],
+                      "provider": provider}
+        # The task finished under budget; the verifier's own
+        # usage may have carried it over. That is recorded, not
+        # punished — the work was already done when it tripped.
+        if self._budget_tripped(task):
+            record["over_budget"] = True
+        task = self.store.update("tasks", task_id, verification=record)
+        self.store.try_trail("verification", dict(record),
                              task_id=task_id)
         return task

@@ -28,11 +28,18 @@ resolved by the configured strategy — "default" (the named default
 profile, else the legacy env adapter), "chain" (the chain's
 configured profiles in order; first success owns the task, failures
 are recorded), "cheapest" (the lowest-priced configured profile
-whose model has known pricing, else "default" behavior) — or by an
-explicit per-task profile override. Every result names its owner in
-"provider" (a profile name, "env", or "mock"). Once a task has an
-owner, later calls go to that owner only: a mid-task provider
-failure raises, it never switches brains.
+whose model has known pricing, else "default" behavior), "best"
+(v0.11.0: the highest-tier configured profile, else "default"
+behavior) — or by an explicit per-task profile override. Every
+result names its owner in "provider" (a profile name, "env", or
+"mock"). Once a task has an owner, later calls go to that owner
+only: a mid-task provider failure raises, it never switches brains.
+
+Ghost Intelligence context + verifier (v0.11.0): the agent may
+thread a per-task planning `context` (trusted-memory recall and
+trusted-skill hints) through next_step into the planner prompt,
+and Router.complete runs ONE raw completion against a task's
+owning provider for the verifier pass — no strategy, no fallback.
 
 Usage accounting (v0.6.0): every plan() call records a usage record
 on the model (``last_usage``) and the Router returns it. Provider
@@ -44,15 +51,32 @@ costs are never guessed.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
 import urllib.error
 import urllib.request
 
+from .providers import TIER_RANK
+
 
 class ModelError(Exception):
     pass
+
+
+def _accepts_context(fn) -> bool:
+    """True when a model callable takes a `context` keyword (or
+    **kwargs). The router threads the v0.11.0 planning context
+    only into adapters that declare it, so adapter doubles from
+    earlier versions — whose next_step(goal, history) knows
+    nothing of context — keep working untouched."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "context" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 # Built-in ESTIMATES, USD per 1M tokens (input, output). Only models
@@ -153,7 +177,10 @@ class MockModel:
         # None in bare unit use — the pattern then falls through.
         self.ecosystem = None
 
-    def plan(self, goal: str) -> list[dict]:
+    def plan(self, goal: str, context: str = "") -> list[dict]:
+        # `context` (v0.11.0 planning context) is accepted for
+        # interface parity and ignored: MockModel pattern-matches
+        # the goal alone, deterministically, as always.
         self.last_usage = usage_record(
             "mock", "mock",
             {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
@@ -244,7 +271,8 @@ class MockModel:
                           "verify": {"type": "ok"}})
         return steps
 
-    def next_step(self, goal: str, history: list[dict]) -> dict | None:
+    def next_step(self, goal: str, history: list[dict],
+                  context: str = "") -> dict | None:
         """Plan-act-observe interface (v0.7.0): serve the existing
         deterministic full plan one step at a time, indexed by how
         many steps history says already ran. Returns None when the
@@ -256,6 +284,13 @@ class MockModel:
             return None
         step = steps[idx]
         return dict(step, args=dict(step.get("args") or {}))
+
+    def complete(self, prompt: str) -> str:
+        """MockModel has no raw-completion ability — it is a
+        rule-based planner, not a text model. Raising keeps the
+        verifier honest: the agent skips verification for
+        MockModel-owned tasks before ever calling this."""
+        raise ModelError("mock model cannot run a completion")
 
 
 PLANNER_GUIDANCE = (
@@ -291,7 +326,7 @@ TOOL_NAMES = ("read_file,list_dir,echo_note,search_files,"
               "list_projects,repo_status,read_project_file")
 
 
-def build_planner_prompt(goal: str) -> str:
+def build_planner_prompt(goal: str, context: str = "") -> str:
     """The planner prompt for the OpenAI-compatible adapter.
 
     The guidance exists because of the first live-model run (Muse
@@ -299,8 +334,12 @@ def build_planner_prompt(goal: str) -> str:
     one-liner to mechanically extract a 'summary' instead of reading
     the source and composing the file with write_file. The run was
     governed correctly; the prompt invited the shortcut.
+
+    `context` (v0.11.0) is the task's Ghost Intelligence context —
+    trusted-memory recall and trusted-skill hints rendered by the
+    agent — appended after the goal when non-empty.
     """
-    return (
+    prompt = (
         "You are a planner. Reply with ONLY a JSON array of steps. "
         "Each step: {\"tool\": one of "
         + TOOL_NAMES + ", "
@@ -308,6 +347,9 @@ def build_planner_prompt(goal: str) -> str:
         + TOOL_SIGNATURES + " "
         + PLANNER_GUIDANCE + " Goal: " + goal
     )
+    if context:
+        prompt += "\n" + context
+    return prompt
 
 
 def format_history(history: list[dict]) -> str:
@@ -329,10 +371,14 @@ def format_history(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_next_step_prompt(goal: str, history: list[dict]) -> str:
+def build_next_step_prompt(goal: str, history: list[dict],
+                           context: str = "") -> str:
     """The plan-act-observe prompt (v0.7.0): one step at a time,
-    with the history of what already ran and what it produced."""
-    return (
+    with the history of what already ran and what it produced.
+    `context` (v0.11.0) carries the task's trusted-memory recall
+    and trusted-skill hints, rendered by the agent, between the
+    goal and the history."""
+    prompt = (
         "You are planning a task one step at a time. Reply with "
         "ONLY a JSON object for the NEXT step: {\"tool\": one of "
         + TOOL_NAMES + ", \"args\": {...}, \"verify\": {\"type\": \"ok\"}} "
@@ -348,8 +394,10 @@ def build_next_step_prompt(goal: str, history: list[dict]) -> str:
         "answer {\"tool\": \"done\"} immediately instead of doing "
         "more verification reads. "
         "Goal: " + goal + "\n"
-        + format_history(history)
     )
+    if context:
+        prompt += context + "\n"
+    return prompt + format_history(history)
 
 
 class OpenAICompatibleModel:
@@ -383,9 +431,9 @@ class OpenAICompatibleModel:
             headers["Authorization"] = "Bearer " + key
         return headers
 
-    def plan(self, goal: str) -> list[dict]:
+    def plan(self, goal: str, context: str = "") -> list[dict]:
         self.last_usage = None
-        prompt = build_planner_prompt(goal)
+        prompt = build_planner_prompt(goal, context)
         body = json.dumps({
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -465,7 +513,8 @@ class OpenAICompatibleModel:
             return None
         return self._normalize_step(steps[idx])
 
-    def next_step(self, goal: str, history: list[dict]) -> dict | None:
+    def next_step(self, goal: str, history: list[dict],
+                  context: str = "") -> dict | None:
         """Ask the provider for the NEXT step given the history of
         completed steps and their outputs. Returns one step dict,
         or None when the provider answers {"tool": "done"} (or a
@@ -480,7 +529,8 @@ class OpenAICompatibleModel:
         self.last_usage = None
         if goal in self._plan_cache:
             return self._serve_cached(goal, history)
-        payload = self._post(build_next_step_prompt(goal, history))
+        payload = self._post(build_next_step_prompt(goal, history,
+                                                    context))
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -512,6 +562,22 @@ class OpenAICompatibleModel:
         if step.get("tool") == "done":
             return None
         return step
+
+    def complete(self, prompt: str) -> str:
+        """One raw completion (v0.11.0): the reply's message text,
+        verbatim. Used by the verifier pass. Same usage recording
+        and empty-response honesty as next_step."""
+        self.last_usage = None
+        payload = self._post(prompt)
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelError(
+                f"provider returned an unusable response: "
+                f"{type(exc).__name__}") from exc
+        if not isinstance(content, str) or not content.strip():
+            raise ModelError("provider returned an empty response")
+        return content
 
 
 class AnthropicModel:
@@ -594,9 +660,9 @@ class AnthropicModel:
             raise ModelError("provider returned an empty response")
         return text
 
-    def plan(self, goal: str) -> list[dict]:
+    def plan(self, goal: str, context: str = "") -> list[dict]:
         self.last_usage = None
-        payload = self._post(build_planner_prompt(goal))
+        payload = self._post(build_planner_prompt(goal, context))
         content = self._content_text(payload)
         try:
             start, end = content.index("["), content.rindex("]") + 1
@@ -634,7 +700,8 @@ class AnthropicModel:
             return None
         return self._normalize_step(steps[idx])
 
-    def next_step(self, goal: str, history: list[dict]) -> dict | None:
+    def next_step(self, goal: str, history: list[dict],
+                  context: str = "") -> dict | None:
         """Ask the provider for the NEXT step given the history.
         Same contract as OpenAICompatibleModel.next_step: one
         step dict, or None on {"tool": "done"}; ModelError on
@@ -643,7 +710,8 @@ class AnthropicModel:
         self.last_usage = None
         if goal in self._plan_cache:
             return self._serve_cached(goal, history)
-        payload = self._post(build_next_step_prompt(goal, history))
+        payload = self._post(build_next_step_prompt(goal, history,
+                                                    context))
         content = self._content_text(payload)
         i_obj = content.find("{")
         i_arr = content.find("[")
@@ -665,6 +733,14 @@ class AnthropicModel:
         if step.get("tool") == "done":
             return None
         return step
+
+    def complete(self, prompt: str) -> str:
+        """One raw completion (v0.11.0): the reply's text blocks
+        concatenated, verbatim. Used by the verifier pass; an
+        empty reply is the shared empty-response ModelError."""
+        self.last_usage = None
+        payload = self._post(prompt)
+        return self._content_text(payload)
 
 
 class Router:
@@ -778,13 +854,19 @@ class Router:
     # ---- plan-act-observe (v0.7.0; profiles + strategies v0.10.0) ---------
     @staticmethod
     def _adapter_next_step(adapter, goal: str,
-                           history: list[dict]) -> dict | None:
+                           history: list[dict],
+                           context: str | None = None) -> dict | None:
         """One next-step call against one adapter. Adapters that
         only implement the legacy full-plan interface are served
         stepwise from their plan by history index (their own
-        ModelError still propagates verbatim)."""
+        ModelError still propagates verbatim). The v0.11.0
+        planning context is passed only to adapters that declare
+        a `context` parameter — earlier adapter doubles keep
+        their two-argument seam."""
         nxt = getattr(adapter, "next_step", None)
         if nxt is not None:
+            if context and _accepts_context(nxt):
+                return nxt(goal, history, context=context)
             return nxt(goal, history)
         steps = adapter.plan(goal)
         idx = len(history or [])
@@ -793,36 +875,42 @@ class Router:
         step = steps[idx]
         return dict(step, args=dict(step.get("args") or {}))
 
-    def _real_next_step(self, goal: str, history: list[dict]) -> dict | None:
-        return self._adapter_next_step(self.real, goal, history)
+    def _real_next_step(self, goal: str, history: list[dict],
+                        context: str | None = None) -> dict | None:
+        return self._adapter_next_step(self.real, goal, history, context)
 
     def _call_profile(self, name: str, goal: str,
-                      history: list[dict]) -> dict:
+                      history: list[dict],
+                      context: str | None = None) -> dict:
         """One first call against a named profile. ModelError
         propagates — the strategy layer decides what a failure
         means; mid-task calls let it fail the task."""
         adapter = self._adapter_for(name)
-        step = self._adapter_next_step(adapter, goal, history)
+        step = self._adapter_next_step(adapter, goal, history, context)
         return self._adapter_result(adapter, step, name)
 
     def _try_profile(self, name: str, goal: str, history: list[dict],
-                     failures: list[str]) -> dict | None:
+                     failures: list[str],
+                     context: str | None = None) -> dict | None:
         """One strategy attempt against a named profile: the
         result on success, or None with the failure appended to
         `failures` (as "name: reason") for the record."""
         try:
-            return self._call_profile(name, goal, history)
+            return self._call_profile(name, goal, history, context)
         except ModelError as exc:
             failures.append(f"{name}: {exc}")
             return None
 
     def _mock_fallback(self, goal: str, history: list[dict],
-                       reason: str) -> dict:
-        return self._mock_result(self.mock.next_step(goal, history),
-                                 fallback_reason=reason)
+                       reason: str,
+                       context: str | None = None) -> dict:
+        return self._mock_result(
+            self._adapter_next_step(self.mock, goal, history, context),
+            fallback_reason=reason)
 
     def _first_call(self, goal: str, history: list[dict],
-                    requested: str | None) -> dict:
+                    requested: str | None,
+                    context: str | None = None) -> dict:
         """Resolve a task's FIRST next-step call: an explicit
         profile override when given, else the configured
         strategy, else the legacy env behavior. First-call
@@ -832,10 +920,12 @@ class Router:
             # Agent.create_task validated the name; a failure here
             # is a provider failure like any other first call.
             failures: list[str] = []
-            result = self._try_profile(requested, goal, history, failures)
+            result = self._try_profile(requested, goal, history,
+                                       failures, context)
             if result is not None:
                 return result
-            return self._mock_fallback(goal, history, failures[0])
+            return self._mock_fallback(goal, history, failures[0],
+                                       context)
         providers = self.providers
         strategy = providers.strategy if providers is not None else "default"
         if providers is not None and strategy == "chain":
@@ -844,7 +934,8 @@ class Router:
                 profile = providers.get(name)
                 if profile is None or not providers.configured(profile):
                     continue  # unconfigured chain entries are skipped
-                result = self._try_profile(name, goal, history, failures)
+                result = self._try_profile(name, goal, history,
+                                           failures, context)
                 if result is not None:
                     if failures:
                         # The chain hopped: record what it hopped
@@ -855,37 +946,74 @@ class Router:
             if failures:
                 return self._mock_fallback(
                     goal, history,
-                    "chain failed: " + "; ".join(failures))
+                    "chain failed: " + "; ".join(failures), context)
             return self._mock_fallback(
                 goal, history,
-                "chain strategy: no configured profiles to try")
+                "chain strategy: no configured profiles to try",
+                context)
         if providers is not None and strategy == "cheapest":
             pick = self._cheapest_pick()
             if pick is not None:
                 failures = []
-                result = self._try_profile(pick, goal, history, failures)
+                result = self._try_profile(pick, goal, history,
+                                           failures, context)
                 if result is not None:
                     return result
-                return self._mock_fallback(goal, history, failures[0])
+                return self._mock_fallback(goal, history, failures[0],
+                                           context)
             # No configured profile is priced: behave as "default".
+        if providers is not None and strategy == "best":
+            pick = self._best_pick()
+            if pick is not None:
+                failures = []
+                result = self._try_profile(pick, goal, history,
+                                           failures, context)
+                if result is not None:
+                    return result
+                return self._mock_fallback(goal, history, failures[0],
+                                           context)
+            # No configured profiles at all: behave as "default".
         if providers is not None and providers.default:
             profile = providers.get(providers.default)
             if profile is not None and providers.configured(profile):
                 failures = []
                 result = self._try_profile(providers.default, goal,
-                                           history, failures)
+                                           history, failures, context)
                 if result is not None:
                     return result
-                return self._mock_fallback(goal, history, failures[0])
+                return self._mock_fallback(goal, history, failures[0],
+                                           context)
         # Legacy env behavior (exactly v0.9.0): self.real serves,
         # MockModel when there is no real adapter.
         if self.real is not None:
             try:
                 return self._real_result(
-                    self._real_next_step(goal, history))
+                    self._real_next_step(goal, history, context))
             except ModelError as exc:
-                return self._mock_fallback(goal, history, str(exc))
-        return self._mock_result(self.mock.next_step(goal, history))
+                return self._mock_fallback(goal, history, str(exc),
+                                           context)
+        return self._mock_result(
+            self._adapter_next_step(self.mock, goal, history, context))
+
+    def _best_pick(self) -> str | None:
+        """The "best" strategy's pick (v0.11.0): among CONFIGURED
+        profiles, the highest EFFECTIVE tier (frontier > standard
+        > small > untiered). Ties — including a field of untiered
+        profiles — break by the profiles' stored order. None when
+        no profile is configured (the caller then behaves as
+        "default")."""
+        providers = self.providers
+        if providers is None:
+            return None
+        best: tuple[int, str] | None = None
+        for name, profile in providers.profiles.items():
+            if not providers.configured(profile):
+                continue
+            rank = TIER_RANK.get(
+                providers.effective_tier(name, profile), 0)
+            if best is None or rank > best[0]:
+                best = (rank, name)
+        return best[1] if best is not None else None
 
     def _cheapest_pick(self) -> str | None:
         """The cheapest strategy's pick: among CONFIGURED
@@ -909,7 +1037,8 @@ class Router:
 
     def next_step(self, goal: str, history: list[dict],
                   brain: str | None = None,
-                  provider: str | None = None) -> dict:
+                  provider: str | None = None,
+                  context: str | None = None) -> dict:
         """One plan-act-observe call. Returns {step, done, model,
         usage, fallback_reason, provider}; step is None when the
         model is done.
@@ -921,22 +1050,28 @@ class Router:
         provider), calls go to that owner only — a provider
         failure raises ModelError so the agent can fail the task
         honestly instead of silently switching brains mid-task.
+
+        `context` (v0.11.0) is the task's planning context
+        (trusted-memory recall + skill hints), threaded into the
+        planner prompt of whichever adapter serves.
         """
         if brain is None:
-            return self._first_call(goal, history, provider)
+            return self._first_call(goal, history, provider, context)
         if provider is not None and provider not in ("env", "mock"):
             # The task is owned by a named profile.
             if brain == self.mock.name:
-                return self._mock_result(self.mock.next_step(goal, history))
+                return self._mock_result(self._adapter_next_step(
+                    self.mock, goal, history, context))
             adapter = self._adapter_for(provider)
             if brain != adapter.name:
                 raise ModelError(f"unknown brain for task: {brain}")
             return self._adapter_result(
                 adapter,
-                self._adapter_next_step(adapter, goal, history),
+                self._adapter_next_step(adapter, goal, history, context),
                 provider)
         if brain == self.mock.name:
-            return self._mock_result(self.mock.next_step(goal, history))
+            return self._mock_result(self._adapter_next_step(
+                self.mock, goal, history, context))
         # The task's brain is the real provider. If this process
         # built its Router without one (e.g. a CLI approve in an
         # env with no key), construct the adapter now — it reads
@@ -946,4 +1081,39 @@ class Router:
             self.real = OpenAICompatibleModel()
         if brain != self.real.name:
             raise ModelError(f"unknown brain for task: {brain}")
-        return self._real_result(self._real_next_step(goal, history))
+        return self._real_result(
+            self._real_next_step(goal, history, context))
+
+    # ---- raw completions (v0.11.0: the verifier pass) ----------------------
+    def complete(self, prompt: str, brain: str | None = None,
+                 provider: str | None = None) -> dict:
+        """One raw completion against a task's OWNING provider —
+        the same owner rules as next_step: a named profile serves
+        its own adapter, "env" serves the legacy adapter (built on
+        demand, exactly as in next_step), and a MockModel owner is
+        an error (the agent skips verification for mock tasks
+        before calling). NO fallback and NO strategy resolution:
+        the verifier judges with the brain that did the work.
+        Returns {text, model, usage, provider}; ModelError
+        propagates so the caller can record an honest "error"
+        outcome."""
+        if provider is not None and provider not in ("env", "mock"):
+            adapter = self._adapter_for(provider)
+            if brain is not None and brain != adapter.name:
+                raise ModelError(f"unknown brain for task: {brain}")
+            text = adapter.complete(prompt)
+            return {"text": text, "model": adapter.name,
+                    "usage": self._with_provider(
+                        getattr(adapter, "last_usage", None), provider),
+                    "provider": provider}
+        if provider == "mock" or brain == self.mock.name:
+            raise ModelError("mock model cannot run a completion")
+        if self.real is None:
+            self.real = OpenAICompatibleModel()
+        if brain is not None and brain != self.real.name:
+            raise ModelError(f"unknown brain for task: {brain}")
+        text = self.real.complete(prompt)
+        return {"text": text, "model": self.real.name,
+                "usage": self._with_provider(
+                    getattr(self.real, "last_usage", None), "env"),
+                "provider": "env"}

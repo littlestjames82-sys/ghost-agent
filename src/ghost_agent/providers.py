@@ -3,12 +3,14 @@
 A providers.json in the agent home describes where the agent's
 model calls may go:
 
-  {"strategy": "default" | "chain" | "cheapest",
+  {"strategy": "default" | "chain" | "cheapest" | "best",
    "default": <profile name or null>,
    "chain": [<profile name>, ...],
    "profiles": {"<name>": {"base_url": ..., "model": ...,
                            "api_key_env": <env var name or null>,
-                           "kind": "openai-compatible" | "anthropic"}}}
+                           "kind": "openai-compatible" | "anthropic",
+                           "tier": "frontier" | "standard" | "small"
+                                   (optional)}}}
 
 The home file is the source of truth; on first run (no home
 file) it is seeded from the presets below and written to the
@@ -32,6 +34,16 @@ crash startup. The failure stays visible — `load_error` /
 best-effort trail event — and the router falls back to the
 legacy env behavior. A broken home file is the user's file: it
 is never overwritten by us.
+
+Tiers (v0.11.0): a profile may carry a "tier" — "frontier",
+"standard", or "small" — used by the "best" router strategy.
+The EFFECTIVE tier of a profile is its own tier when valid,
+else the preset tier for a same-named profile, else None: a
+providers.json written by v0.10.0 (no tier keys anywhere) still
+yields the preset tiers, because the merge happens at read
+time. The user's file is never rewritten to add tiers. An
+invalid tier value is ignored for selection but stays visible
+raw in the /api/system block as "tier_configured".
 """
 from __future__ import annotations
 
@@ -39,8 +51,12 @@ import json
 import os
 from pathlib import Path
 
-STRATEGIES = ("default", "chain", "cheapest")
+STRATEGIES = ("default", "chain", "cheapest", "best")
 KINDS = ("openai-compatible", "anthropic")
+
+# Capability tiers for the "best" strategy (v0.11.0), best first.
+TIERS = ("frontier", "standard", "small")
+TIER_RANK = {"frontier": 3, "standard": 2, "small": 1}
 
 # The presets seeded into a fresh home's providers.json. Model
 # names are each provider's documented default-class choice;
@@ -49,43 +65,53 @@ PRESET_PROFILES: dict[str, dict] = {
     "meta": {"base_url": "https://api.meta.ai/v1",
              "model": "muse-spark-1.3",
              "api_key_env": "META_API_KEY",
-             "kind": "openai-compatible"},
+             "kind": "openai-compatible",
+             "tier": "frontier"},
     "openai": {"base_url": "https://api.openai.com/v1",
                "model": "gpt-4o-mini",
                "api_key_env": "OPENAI_API_KEY",
-               "kind": "openai-compatible"},
+               "kind": "openai-compatible",
+               "tier": "standard"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1",
                    "model": "openai/gpt-4o-mini",
                    "api_key_env": "OPENROUTER_API_KEY",
-                   "kind": "openai-compatible"},
+                   "kind": "openai-compatible",
+                   "tier": "standard"},
     "fireworks": {"base_url": "https://api.fireworks.ai/inference/v1",
                   "model": "accounts/fireworks/models/llama-v3p3-70b-instruct",
                   "api_key_env": "FIREWORKS_API_KEY",
-                  "kind": "openai-compatible"},
+                  "kind": "openai-compatible",
+                  "tier": "standard"},
     "groq": {"base_url": "https://api.groq.com/openai/v1",
              "model": "llama-3.3-70b-versatile",
              "api_key_env": "GROQ_API_KEY",
-             "kind": "openai-compatible"},
+             "kind": "openai-compatible",
+             "tier": "standard"},
     "together": {"base_url": "https://api.together.xyz/v1",
                  "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
                  "api_key_env": "TOGETHER_API_KEY",
-                 "kind": "openai-compatible"},
+                 "kind": "openai-compatible",
+                 "tier": "standard"},
     "gemini": {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
                "model": "gemini-2.5-flash",
                "api_key_env": "GEMINI_API_KEY",
-               "kind": "openai-compatible"},
+               "kind": "openai-compatible",
+               "tier": "standard"},
     "ollama": {"base_url": "http://127.0.0.1:11434/v1",
                "model": "llama3.1",
                "api_key_env": None,
-               "kind": "openai-compatible"},
+               "kind": "openai-compatible",
+               "tier": "small"},
     "lmstudio": {"base_url": "http://127.0.0.1:1234/v1",
                  "model": "local-model",
                  "api_key_env": None,
-                 "kind": "openai-compatible"},
+                 "kind": "openai-compatible",
+                 "tier": "small"},
     "anthropic": {"base_url": "https://api.anthropic.com",
                   "model": "claude-sonnet-4-5",
                   "api_key_env": "ANTHROPIC_API_KEY",
-                  "kind": "anthropic"},
+                  "kind": "anthropic",
+                  "tier": "frontier"},
 }
 
 
@@ -124,6 +150,11 @@ def _validate_profile(raw) -> dict | None:
         "model": model.strip(),
         "api_key_env": key_env.strip() if isinstance(key_env, str) else None,
         "kind": kind,
+        # The tier as configured, kept verbatim (None when the
+        # file does not name one). Validity is a selection-time
+        # question — see Providers.effective_tier — so an invalid
+        # value survives loading and stays visible in /api/system.
+        "tier": raw.get("tier"),
     }
 
 
@@ -262,6 +293,23 @@ class Providers:
         return [name for name, p in self.profiles.items()
                 if self.configured(p)]
 
+    @staticmethod
+    def effective_tier(name: str, profile: dict) -> str | None:
+        """The tier the "best" strategy ranks by: the profile's
+        own tier when it is one of TIERS, else the preset tier
+        for a same-named profile, else None. The merge is done
+        here, at read time, so a providers.json written before
+        tiers existed still ranks its preset-named profiles —
+        and the user's file is never rewritten to add tiers."""
+        own = (profile or {}).get("tier")
+        if isinstance(own, str) and own in TIERS:
+            return own
+        preset = PRESET_PROFILES.get(name) or {}
+        preset_tier = preset.get("tier")
+        if isinstance(preset_tier, str) and preset_tier in TIERS:
+            return preset_tier
+        return None
+
     # ---- dashboard -----------------------------------------------------
     def system_block(self) -> dict:
         """The /api/system providers block. Names, models,
@@ -281,6 +329,13 @@ class Providers:
                     "api_key_env": p["api_key_env"],
                     "configured": self.configured(p),
                     "key_present": self.key_present(p),
+                    # v0.11.0: the effective tier the "best"
+                    # strategy ranks by (or null), plus the tier
+                    # exactly as configured in the file (or null)
+                    # so an invalid value stays visible instead
+                    # of being silently normalized away.
+                    "tier": self.effective_tier(name, p),
+                    "tier_configured": p.get("tier"),
                 }
                 for name, p in self.profiles.items()
             },
