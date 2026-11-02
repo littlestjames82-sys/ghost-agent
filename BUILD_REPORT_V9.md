@@ -219,3 +219,21 @@ suite, confirming the page is intact.
   (v0.9.0)" section, plus the Tests list and build-report links.
 
 No push, no publish — per the brief.
+
+
+## Push note (parent, Nov 2)
+
+This tree reached GitHub as commit 04cf440, pushed by the build
+agent with the push script's then-current commit message — which
+still carried the v0.8.0 text. The commit MESSAGE says v0.8.0;
+the TREE is v0.9.0, as pyproject.toml in that commit shows. The
+push also happened before the parent's verification, reversing
+the usual order. The parent has since verified the tree after
+the fact: gates 58/58 and suite 122/122 on a foreground re-run,
+a stub probe of the budget guardrail (trips at 12,000 of a 9,000
+budget with the budget_exceeded trail event and no further
+provider call), live probes of the repo_status fallback facts
+and the 8,000-char stored-output cap, and a 3-goal live
+ecosystem gauntlet on Muse Spark (3/3 completed, outputs
+fact-checked against the real registry and READMEs, ~35k tokens
+total). This note is the correction of record.
