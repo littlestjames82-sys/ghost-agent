@@ -163,16 +163,24 @@ def approvals_payload(store: Store, agent: Agent) -> list[dict]:
 
 def activity_by_day(store: Store, days: int = 14) -> list[dict]:
     """Trail events per UTC day over the last `days` days, oldest
-    first, zero-filled. Derived only from real event timestamps."""
+    first, zero-filled. Derived only from real event timestamps.
+    v0.6.0: each day also carries `approvals_decided` — the count of
+    approval_granted + approval_denied trail events that day (the
+    data was already in the trail; it is only counted, never
+    inferred)."""
     today = datetime.now(timezone.utc).date()
     window = [(today - timedelta(days=off)).isoformat()
               for off in range(days - 1, -1, -1)]
     counts = dict.fromkeys(window, 0)
+    decided = dict.fromkeys(window, 0)
     for e in store.read_trail(limit=1_000_000):
         day = (e.get("ts") or "")[:10]
         if day in counts:
             counts[day] += 1
-    return [{"date": d, "count": counts[d]} for d in window]
+            if e.get("type") in ("approval_granted", "approval_denied"):
+                decided[day] += 1
+    return [{"date": d, "count": counts[d], "approvals_decided": decided[d]}
+            for d in window]
 
 
 def overview_payload(store: Store, agent: Agent) -> dict:
@@ -203,6 +211,94 @@ def overview_payload(store: Store, agent: Agent) -> dict:
         "recent_tasks": recent,
         "activity_by_day": activity_by_day(store),
         "version": __version__,
+    }
+
+
+def _usage_summary(store: Store) -> dict:
+    """Aggregate the per-task usage accounting (v0.6.0) into totals
+    with a per-model breakdown. Cost is an ESTIMATE summed only over
+    calls whose model is in the built-in price table: if any real
+    provider call is unpriced, the total estimated_cost_usd is None
+    (unknown) — a partial sum is exposed separately as
+    known_estimated_cost_usd and is never presented as the total."""
+    calls = prompt = completion = total = 0
+    provider_calls = mock_calls = 0
+    known_cost = 0.0
+    unknown_provider_calls = 0
+    by_model: dict[str, dict] = {}
+    for t in store.list("tasks"):
+        models = t.get("usage_by_model")
+        if not isinstance(models, dict) or not models:
+            totals = t.get("usage_totals")
+            if isinstance(totals, dict):
+                models = {t.get("model") or "unknown": {
+                    "calls": totals.get("calls", 1),
+                    "source": t.get("usage_source"),
+                    "prompt_tokens": totals.get("prompt_tokens", 0),
+                    "completion_tokens": totals.get("completion_tokens", 0),
+                    "total_tokens": totals.get("total_tokens", 0),
+                    "estimated_cost_usd": totals.get("estimated_cost_usd"),
+                    "cost_status": totals.get("cost_status"),
+                }}
+            else:
+                models = {}
+        for name, u in models.items():
+            if not isinstance(u, dict):
+                continue
+            n = u.get("calls") or 1
+            entry = by_model.setdefault(name, {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "estimated_cost_usd": 0.0,
+                "cost_status": "estimated", "_unknown_calls": 0,
+                "_provider_calls": 0})
+            entry["calls"] += n
+            entry["prompt_tokens"] += u.get("prompt_tokens") or 0
+            entry["completion_tokens"] += u.get("completion_tokens") or 0
+            entry["total_tokens"] += u.get("total_tokens") or 0
+            calls += n
+            prompt += u.get("prompt_tokens") or 0
+            completion += u.get("completion_tokens") or 0
+            total += u.get("total_tokens") or 0
+            source = u.get("source")
+            if source == "provider":
+                provider_calls += n
+                entry["_provider_calls"] += n
+                if u.get("cost_status") == "estimated" and \
+                        isinstance(u.get("estimated_cost_usd"), (int, float)):
+                    known_cost += u["estimated_cost_usd"]
+                    entry["estimated_cost_usd"] += u["estimated_cost_usd"]
+                else:
+                    unknown_provider_calls += n
+                    entry["_unknown_calls"] += n
+            elif source == "mock":
+                mock_calls += n
+    for entry in by_model.values():
+        if entry["_unknown_calls"]:
+            entry["estimated_cost_usd"] = None
+            entry["cost_status"] = "unknown"
+        elif not entry["_provider_calls"]:
+            entry["estimated_cost_usd"] = 0.0
+            entry["cost_status"] = "not_applicable"
+        del entry["_unknown_calls"], entry["_provider_calls"]
+    if provider_calls == 0:
+        estimated, status = 0.0, "mock_only"
+    elif unknown_provider_calls:
+        estimated, status = None, "unknown"
+    else:
+        estimated, status = round(known_cost, 6), "estimated"
+    return {
+        "tracked": True,
+        "calls": calls,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "provider_calls": provider_calls,
+        "mock_calls": mock_calls,
+        "estimated_cost_usd": estimated,
+        "known_estimated_cost_usd": round(known_cost, 6),
+        "cost_status": status,
+        "cost_unknown_calls": unknown_provider_calls,
+        "by_model": by_model,
     }
 
 
@@ -247,6 +343,9 @@ def analytics_payload(store: Store, agent: Agent) -> dict:
         "trail_by_type": by_type,
         "activity_by_day": activity_by_day(store),
         "tokens_tracked": tokens_tracked,
+        # v0.6.0: real usage accounting (see _usage_summary). The
+        # legacy tokens_* fields above are kept for compatibility.
+        "usage": _usage_summary(store),
     }
     if tokens_tracked:
         out["tokens_total"] = tokens_total
@@ -372,7 +471,216 @@ def export_payload(store: Store) -> dict:
         "skills": Skills(store).list_all(),
         "schedules": store.list("schedules"),
         "trail": store.read_trail(limit=1_000_000),
+        # Archived import history (v0.6.0) round-trips too, so an
+        # export of a store that imported keeps its archive intact.
+        "archived_tasks": store.list("archived_tasks"),
+        "archived_approvals": store.list("archived_approvals"),
+        "archived_trail": store.list("archived_trail"),
     }
+
+
+# ---- safe import (v0.6.0) -------------------------------------------------
+_SNAP_REQUIRED_LISTS = ("tasks", "approvals", "memories_trusted",
+                        "memories_candidates", "skills", "schedules",
+                        "trail")
+_SNAP_ARCHIVE_LISTS = ("archived_tasks", "archived_approvals",
+                       "archived_trail")
+_ID_PREFIXES = {"tasks": "tsk", "approvals": "apr", "memories": "mem",
+                "skills": "skl", "schedules": "sch",
+                "archived_tasks": "tsk", "archived_approvals": "apr",
+                "archived_trail": "ev"}
+
+
+def _validate_snapshot(snapshot) -> dict:
+    """Validate an export snapshot FULLY, before anything is
+    written. Returns the normalized lists. Raises ValueError with a
+    plain-language reason on any wrong shape — the caller turns
+    that into a 400 and the store is guaranteed untouched."""
+    if not isinstance(snapshot, dict):
+        raise ValueError("snapshot must be a JSON object (a Ghost Agent export)")
+    if "version" in snapshot and not isinstance(snapshot["version"], str):
+        raise ValueError("snapshot 'version' must be a string")
+    data: dict[str, list] = {}
+    for key in _SNAP_REQUIRED_LISTS:
+        value = snapshot.get(key)
+        if not isinstance(value, list):
+            raise ValueError(f"snapshot '{key}' must be a list")
+        data[key] = value
+    for key in _SNAP_ARCHIVE_LISTS:
+        value = snapshot.get(key, [])
+        if not isinstance(value, list):
+            raise ValueError(f"snapshot '{key}' must be a list")
+        data[key] = value
+
+    def entities(key, need_id=True):
+        seen: set[str] = set()
+        for item in data[key]:
+            if not isinstance(item, dict):
+                raise ValueError(f"snapshot '{key}' entries must be objects")
+            if need_id:
+                eid = item.get("id")
+                if not isinstance(eid, str) or not eid:
+                    raise ValueError(f"snapshot '{key}' entry is missing an id")
+                if eid in seen:
+                    raise ValueError(
+                        f"snapshot '{key}' has duplicate id {eid!r}")
+                seen.add(eid)
+        return data[key]
+
+    for key in ("tasks", "approvals", "skills", "schedules"):
+        entities(key)
+    for key in ("memories_trusted", "memories_candidates"):
+        for item in entities(key):
+            if not isinstance(item.get("text"), str):
+                raise ValueError("imported memories must carry text")
+    for item in data["skills"]:
+        if not isinstance(item.get("name"), str):
+            raise ValueError("imported skills must carry a name")
+        for field in ("steps", "tools", "permissions"):
+            if field in item and not isinstance(item[field], list):
+                raise ValueError(f"imported skill field '{field}' must be a list")
+    for item in data["schedules"]:
+        if not isinstance(item.get("goal"), str) or not item["goal"].strip():
+            raise ValueError("imported schedules must carry a goal")
+        if "kind" in item and item["kind"] not in ("interval", "daily"):
+            raise ValueError("imported schedule kind must be 'interval' or 'daily'")
+    for item in data["tasks"] + data["archived_tasks"]:
+        if "steps" in item and not isinstance(item["steps"], list):
+            raise ValueError("imported task 'steps' must be a list")
+        for field in ("goal", "title"):
+            if field in item and not isinstance(item[field], str):
+                raise ValueError(f"imported task '{field}' must be a string")
+    for item in data["trail"] + data["archived_trail"]:
+        if not isinstance(item, dict):
+            raise ValueError("snapshot trail entries must be objects")
+        if "detail" in item and not isinstance(item["detail"], dict):
+            raise ValueError("imported trail 'detail' must be an object")
+    return data
+
+
+def import_snapshot(store: Store, snapshot) -> dict:
+    """Import an export snapshot with hard safety semantics:
+
+    - memories and skills land as CANDIDATES only (never trusted,
+      verified reset), with provenance source prefixed "import:";
+    - schedules arrive DISABLED;
+    - tasks, approvals, and trail are stored as ARCHIVED history in
+      separate collections, flagged imported — never in the live
+      collections, never actionable, never re-run;
+    - duplicate ids are re-minted, never overwritten, and internal
+      references are remapped to the new ids;
+    - validation happens fully before the first write, so a bad
+      snapshot changes NOTHING.
+    Returns the imported counts.
+    """
+    data = _validate_snapshot(snapshot)
+
+    import copy as _copy
+    memories = [_copy.deepcopy(m) for m in
+                data["memories_trusted"] + data["memories_candidates"]]
+    skills = [_copy.deepcopy(s) for s in data["skills"]]
+    schedules = [_copy.deepcopy(s) for s in data["schedules"]]
+    arch_tasks = [_copy.deepcopy(t) for t in
+                  data["tasks"] + data["archived_tasks"]]
+    arch_approvals = [_copy.deepcopy(a) for a in
+                      data["approvals"] + data["archived_approvals"]]
+    arch_trail = [_copy.deepcopy(e) for e in
+                  data["trail"] + data["archived_trail"]]
+    for e in arch_trail:
+        e.setdefault("id", new_id("ev"))
+
+    targets = {"memories": memories, "skills": skills,
+               "schedules": schedules, "archived_tasks": arch_tasks,
+               "archived_approvals": arch_approvals,
+               "archived_trail": arch_trail}
+    # Pass 1: re-mint colliding ids (against the store and this batch).
+    maps: dict[str, dict[str, str]] = {k: {} for k in
+                                       ("tasks", "approvals", "memories",
+                                        "skills", "schedules")}
+    reminted = 0
+    for coll, items in targets.items():
+        used = {e["id"] for e in store.list(coll)}
+        map_key = {"archived_tasks": "tasks",
+                   "archived_approvals": "approvals"}.get(coll, coll)
+        for item in items:
+            old = item["id"]
+            if old in used:
+                new = new_id(_ID_PREFIXES[coll])
+                while new in used:
+                    new = new_id(_ID_PREFIXES[coll])
+                item["id"] = new
+                if map_key in maps:
+                    maps[map_key][old] = new
+                reminted += 1
+            used.add(item["id"])
+
+    def ref(coll, value):
+        if isinstance(value, str):
+            return maps[coll].get(value, value)
+        return value
+
+    # Pass 2: remap internal references, then apply the safety
+    # transforms (candidate-only, disabled, archived).
+    for m in memories:
+        m["superseded_by"] = ref("memories", m.get("superseded_by"))
+        if m.get("supersedes"):
+            m["supersedes"] = ref("memories", m["supersedes"])
+        original_status = m.get("status")
+        src = m.get("source")
+        m["status"] = "candidate"
+        m["verified"] = False
+        m["source"] = (src if isinstance(src, str) and src.startswith("import:")
+                       else f"import:{src if isinstance(src, str) and src else 'unknown'}")
+        m["imported"] = True
+        m["imported_from_status"] = original_status
+    for s in skills:
+        s["from_task"] = ref("tasks", s.get("from_task"))
+        src = s.get("source")
+        s["status"] = "candidate"
+        s["trusted"] = False
+        s["source"] = (src if isinstance(src, str) and src.startswith("import:")
+                       else f"import:{src if isinstance(src, str) and src else 'export'}")
+        s["imported"] = True
+    for s in schedules:
+        s["last_task_id"] = ref("tasks", s.get("last_task_id"))
+        s["enabled"] = False
+        s["imported"] = True
+    for t in arch_tasks:
+        t["skill_id"] = ref("skills", t.get("skill_id"))
+        t["imported"] = True
+        t["archived"] = True
+    for a in arch_approvals:
+        a["task_id"] = ref("tasks", a.get("task_id"))
+        a["imported"] = True
+        a["archived"] = True
+    for e in arch_trail:
+        e["task_id"] = ref("tasks", e.get("task_id"))
+        detail = e.get("detail")
+        if isinstance(detail, dict):
+            for key, coll in (("approval_id", "approvals"),
+                              ("memory_id", "memories"),
+                              ("skill_id", "skills"),
+                              ("schedule_id", "schedules"),
+                              ("from_task", "tasks"),
+                              ("task_id", "tasks"),
+                              ("old_id", "memories"),
+                              ("new_id", "memories")):
+                if key in detail:
+                    detail[key] = ref(coll, detail[key])
+        e["imported"] = True
+        e["archived"] = True
+
+    # Pass 3: write (validation already passed; nothing above wrote).
+    for coll, items in targets.items():
+        for item in items:
+            store.put(coll, item)
+    counts = {"memories": len(memories), "skills": len(skills),
+              "schedules": len(schedules), "tasks": len(arch_tasks),
+              "approvals": len(arch_approvals),
+              "trail_events": len(arch_trail),
+              "reminted_ids": reminted}
+    store.try_trail("state_imported", dict(counts))
+    return counts
 
 
 def decide_all(store: Store, agent: Agent, decision: str) -> dict:
@@ -552,6 +860,11 @@ padding:5px 12px;font-size:12.5px;cursor:pointer}
 .actbar{flex:1;background:linear-gradient(180deg,var(--violet2),var(--violet));border-radius:3px 3px 0 0;min-height:2px}
 .actlabels{display:flex;gap:3px;font-size:9px;color:var(--muted);margin-top:3px}
 .actlabels span{flex:1;text-align:center;overflow:hidden;white-space:nowrap}
+.actday{flex:1;display:flex;align-items:flex-end;gap:1px;height:100%}
+.actday .actbar{flex:1}
+.actbar.appr{background:linear-gradient(180deg,#ffd28a,var(--amber))}
+.actlegend{display:flex;gap:14px;font-size:10px;color:var(--muted);margin-top:5px}
+.actlegend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 .donutwrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .donut{width:130px;height:130px;border-radius:50%;position:relative;flex:0 0 130px}
 .donut i{position:absolute;inset:24px;border-radius:50%;background:var(--bg);
@@ -892,7 +1205,7 @@ const PAGES=["overview","board","approvals","tasks","chat","memory","skills","an
 const PAGE_TITLES={overview:"Overview",board:"Board",approvals:"Approvals",tasks:"Tasks",chat:"Chat",memory:"Memory",skills:"Skills",analytics:"Analytics",logs:"Logs",schedules:"Schedules",system:"System"};
 let curPage="overview", selectedTask=null, logTypesLoaded=false;
 let logsPaused=false, lastBoard=null, lastMem=null, lastSkills=null, lastLogs=[], lastApprovals=[];
-let lastSchedules=[], chatTaskId=null, paletteFiltered=[];
+let lastSchedules=[], chatTaskId=null, paletteFiltered=[], lastImportStatus="";
 let taskStatusFilter="all", skillStatusFilter="all";
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function cookieTok(){const m=document.cookie.match(/(?:^|; )ghost_token=([^;]*)/);return m?decodeURIComponent(m[1]):""}
@@ -952,14 +1265,37 @@ function barsPct(obj,total){
     return "<div class='bar-row'><span class='bl'>"+esc(k)+"</span><span class='bar-track'><span class='bar-fill' style='display:block;width:"+Math.round(v/max*100)+"%'></span></span><span class='bv'>"+v+" - "+pct+"%</span></div>";
   }).join("")+"</div>";
 }
-function activityChart(data){
+function activityChart(data,showApprovals){
   if(!data||!data.length) return "<p class='small'>No activity data.</p>";
-  const max=Math.max(1,...data.map(d=>d.count));
+  const max=Math.max(1,...data.map(d=>Math.max(d.count,showApprovals?(d.approvals_decided||0):0)));
   const total=data.reduce((a,d)=>a+d.count,0);
-  let h="<div class='actchart'>"+data.map(d=>
-    "<div class='actbar' style='height:"+Math.max(3,Math.round(d.count/max*100))+"%' title='"+esc(d.date)+": "+d.count+" events'></div>").join("")+"</div>";
+  let h;
+  if(showApprovals){
+    h="<div class='actchart'>"+data.map(d=>
+      "<div class='actday'><div class='actbar' style='height:"+Math.max(3,Math.round(d.count/max*100))+"%' title='"+esc(d.date)+": "+d.count+" events'></div>"+
+      "<div class='actbar appr' style='height:"+Math.max(3,Math.round((d.approvals_decided||0)/max*100))+"%' title='"+esc(d.date)+": "+(d.approvals_decided||0)+" approvals decided'></div></div>").join("")+"</div>";
+    const dec=data.reduce((a,d)=>a+(d.approvals_decided||0),0);
+    h+="<div class='actlegend'><span><span class='sw' style='background:var(--violet)'></span>Trail events</span><span><span class='sw' style='background:var(--amber)'></span>Approvals decided ("+dec+" in window)</span></div>";
+  }else{
+    h="<div class='actchart'>"+data.map(d=>
+      "<div class='actbar' style='height:"+Math.max(3,Math.round(d.count/max*100))+"%' title='"+esc(d.date)+": "+d.count+" events'></div>").join("")+"</div>";
+  }
   h+="<div class='actlabels'>"+data.map((d,i)=>"<span>"+(i%2?"":esc(d.date.slice(5)))+"</span>").join("")+"</div>";
   if(!total) h+="<p class='small'>No trail events in the last 14 days.</p>";
+  return h;
+}
+function usageHtml(u){
+  if(!u) return "<p class='small' style='margin-top:14px'>Usage is not available.</p>";
+  let h="<div class='seclabel'>Usage - tracked model calls</div>"+
+    "<p>Tokens: "+u.prompt_tokens+" prompt + "+u.completion_tokens+" completion = <b>"+u.total_tokens+"</b> total across "+u.calls+" model calls ("+u.provider_calls+" provider, "+u.mock_calls+" MockModel).</p>";
+  if(u.cost_status==="estimated")
+    h+="<p>Estimated cost: $"+Number(u.estimated_cost_usd).toFixed(4)+" (estimate from the built-in price table).</p>";
+  else if(u.cost_status==="unknown")
+    h+="<p>Estimated cost: <b>unknown</b> - no built-in price for "+u.cost_unknown_calls+" provider call(s), and costs are never guessed.</p>";
+  else
+    h+="<p>Estimated cost: $0.00 - MockModel only, no provider usage.</p>";
+  const totals={}; Object.entries(u.by_model||{}).forEach(([k,v])=>{ totals[k]=v.total_tokens; });
+  h+="<div class='seclabel'>Tokens by model</div>"+bars(totals);
   return h;
 }
 const STATUS_COLORS={done:"#3ecf6e",failed:"#ff5c5c",waiting_approval:"#ffb43a",running:"#a678ff",pending:"#5ea8ff",unknown:"#8a86a3"};
@@ -1006,7 +1342,7 @@ function toggleExpand(btn){
 function taskStepCounts(t){ const steps=t.steps||[];
   return {done:steps.filter(s=>s.status==="done").length,total:steps.length}; }
 function glyphFor(tool){
-  return {write_file:"WRITE",read_file:"READ",list_dir:"LIST",echo_note:"NOTE",shell:"EXEC"}[tool]
+  return {write_file:"WRITE",read_file:"READ",list_dir:"LIST",echo_note:"NOTE",shell:"EXEC",search_files:"FIND",append_file:"APND"}[tool]
     ||String(tool||"STEP").slice(0,5).toUpperCase();
 }
 function provStrip(cells){
@@ -1241,6 +1577,20 @@ function copyCmd(id){
   const t=document.getElementById(id).textContent;
   if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(t);
 }
+async function importState(){
+  const f=document.getElementById("import-file");
+  if(!f||!f.files||!f.files.length){ lastImportStatus="Choose an export JSON file first."; refresh(); return }
+  let obj;
+  try{ obj=JSON.parse(await f.files[0].text()); }
+  catch(e){ lastImportStatus="That file is not valid JSON - nothing was imported."; refresh(); return }
+  let r;
+  try{ r=await j("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(obj)}); }
+  catch(e){ lastImportStatus="Import failed - the server refused or is unreachable; nothing was imported."; refresh(); return }
+  if(r&&r.imported){ const c=r.imported;
+    lastImportStatus="Imported: "+c.memories+" memories (candidates only), "+c.skills+" skills (candidates only), "+c.schedules+" schedules (disabled), "+c.tasks+" tasks archived, "+c.approvals+" approvals archived, "+c.trail_events+" trail events archived, "+c.reminted_ids+" duplicate ids re-minted.";
+  } else lastImportStatus="Import failed: "+((r&&r.error)||"unknown error")+" - nothing was imported.";
+  refresh();
+}
 async function retryTask(id){
   let r; try{ r=await j("/api/tasks/"+id+"/retry",{method:"POST"}) }catch(e){ return }
   if(r&&r.task){ selectedTask=r.task.id; showPage("tasks"); refresh(); }
@@ -1434,7 +1784,7 @@ async function refresh(){
     statCard(c.total,"Tasks total","tasks")+statCard(c.running,"Running","board")+statCard(c.waiting_approval,"Waiting approval","approvals")+
     statCard(c.done,"Done","board")+statCard(c.failed,"Failed","board")+statCard(ov.trusted_memories,"Trusted memories","memory")+
     statCard(ov.candidate_memories,"Memory candidates","memory")+statCard(ov.skills_total,"Skills","skills")+statCard(ov.trail_events,"Trail events","logs");
-  document.getElementById("ov-activity").innerHTML=activityChart(ov.activity_by_day);
+  document.getElementById("ov-activity").innerHTML=activityChart(ov.activity_by_day,true);
   const attnPill=document.getElementById("ov-attn-pill");
   if(attnPill) attnPill.textContent=ov.pending_approvals.length+" waiting";
   document.getElementById("ov-attention").innerHTML=ov.pending_approvals.length?ov.pending_approvals.map((a,idx)=>
@@ -1461,9 +1811,7 @@ async function refresh(){
   ah+="<div class='seclabel'>Tasks by model</div>"+bars(an.tasks_by_model);
   ah+="<div class='seclabel'>Trail events by type</div>"+barsPct(an.trail_by_type,an.trail_total);
   ah+="<div class='seclabel'>Activity - trail events, last 14 days</div>"+activityChart(an.activity_by_day);
-  ah+= an.tokens_tracked
-    ? "<div class='seclabel'>Usage</div><p>tokens: "+an.tokens_total+" - cost: "+an.cost_total+"</p>"
-    : "<p class='small' style='margin-top:14px'>Usage: "+esc(an.tokens_note||"token/cost not tracked yet")+" - tasks record steps and verdicts, not provider token counts.</p>";
+  ah+=usageHtml(an.usage);
   document.getElementById("analytics").innerHTML=ah;
   // system
   const h=sys.health||{};
@@ -1503,6 +1851,11 @@ async function refresh(){
     "<dt>Schedules</dt><dd>"+lastSchedules.length+"</dd>"+
     "<dt>Trail events</dt><dd>"+ov.trail_events+"</dd></dl>"+
     "<p><a href='/api/export'><button type='button' class='ghostbtn small'>Download state export (JSON)</button></a></p></div>";
+  sh+="<div class='seclabel'>Import state</div><div id='sys-import'>"+
+    "<p class='small'>Import a Ghost Agent export JSON. Safety rules: imported memories and skills arrive as <b>candidates only</b> (never trusted), schedules arrive <b>disabled</b>, and tasks, approvals, and trail are kept as <b>archived history</b> that is never re-run. Existing records are never overwritten; duplicate ids are re-minted.</p>"+
+    "<p><input type='file' id='import-file' accept='application/json,.json'> "+
+    "<button type='button' class='ghostbtn small' onclick='importState()'>Import snapshot</button></p>"+
+    "<p class='small' id='import-status'>"+esc(lastImportStatus)+"</p></div>";
   document.getElementById("system").innerHTML=sh;
   // logs (preserve filter values; skip the fetch while paused)
   const lt=document.getElementById("log-type"), lq=document.getElementById("log-q");
@@ -1708,6 +2061,14 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                 task = agent.create_task(goal, title=data.get("title"))
                 task = agent.run_task(task["id"])
                 return self._send(201, {"task": task})
+            if path == "/api/import":
+                # Safe import: validated fully before any write;
+                # a wrong shape is a 400 and changes NOTHING.
+                try:
+                    counts = import_snapshot(store, self._body())
+                except ValueError as exc:
+                    return self._send(400, {"error": str(exc)})
+                return self._send(200, {"imported": counts})
             if path == "/api/approvals/decide_all":
                 data = self._body()
                 decision = data.get("decision")

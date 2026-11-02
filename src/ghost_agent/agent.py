@@ -40,6 +40,12 @@ class Agent:
                 "result": None,
                 "error": None,
             })
+        usage = planned.get("usage") or {
+            "model": planned["model"], "source": "mock",
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "estimated_cost_usd": 0.0, "cost_status": "not_applicable",
+        }
+        usage_model = usage.get("model") or planned["model"]
         task = {
             "id": new_id("tsk"),
             "title": title or goal[:60],
@@ -51,6 +57,27 @@ class Agent:
             "fallback_reason": planned["fallback_reason"],
             "skill_id": None,
             "error": None,
+            # v0.6.0 usage accounting: cumulative totals for the
+            # (single, planning) model call behind this task, plus a
+            # per-model breakdown. MockModel records honest zeros.
+            "usage_totals": {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+                "calls": 1,
+                "estimated_cost_usd": usage.get("estimated_cost_usd"),
+                "cost_status": usage.get("cost_status"),
+            },
+            "usage_by_model": {usage_model: {
+                "calls": 1,
+                "source": usage.get("source"),
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+                "estimated_cost_usd": usage.get("estimated_cost_usd"),
+                "cost_status": usage.get("cost_status"),
+            }},
+            "usage_source": usage.get("source"),
         }
         task = self.store.put("tasks", task)
         if planned["fallback_reason"]:
@@ -58,6 +85,8 @@ class Agent:
                                  {"reason": planned["fallback_reason"],
                                   "model": planned["model"]},
                                  task_id=task["id"])
+        # One trail event per model call, carrying the usage numbers.
+        self.store.try_trail("model_usage", dict(usage), task_id=task["id"])
         self.store.try_trail("task_created", {"goal": goal}, task_id=task["id"])
         return task
 
@@ -139,6 +168,9 @@ class Agent:
         task = self.store.get("tasks", task_id)
         if task is None:
             return None
+        if task.get("imported") or task.get("archived"):
+            # Imported history is never re-run (v0.6.0 import safety).
+            return task
         if task["status"] in ("done", "failed"):
             return task
         task = self.store.update("tasks", task_id, status="running")

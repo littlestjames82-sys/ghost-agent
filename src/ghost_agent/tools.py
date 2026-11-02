@@ -11,9 +11,14 @@ TOOL_KINDS = {
     "read_file": "read",
     "list_dir": "read",
     "echo_note": "read",
+    "search_files": "read",
     "write_file": "write",
+    "append_file": "write",
     "shell": "exec",
 }
+
+SEARCH_MAX_RESULTS = 50
+SEARCH_MAX_FILE_BYTES = 1_000_000
 
 
 def tool_kind(name: str) -> str | None:
@@ -54,11 +59,80 @@ class Tools:
     def echo_note(self, text: str = "") -> dict:
         return {"ok": True, "output": str(text)}
 
+    def search_files(self, query: str, path: str = ".") -> dict:
+        """Literal substring search across the workspace (read tool).
+
+        Returns matching files as workspace-relative paths with line
+        numbers and the matched line text. Caps at SEARCH_MAX_RESULTS
+        matches, skips binary files and files over 1 MB, and cannot
+        escape the workspace root: the base path goes through the
+        same _resolve sandbox check as every other tool, and each
+        candidate file is re-checked for containment (symlinks
+        included). Matching is case-sensitive and literal — this is
+        a finder, not a regex engine.
+        """
+        query = str(query or "")
+        if not query:
+            return {"ok": False, "error": "query is required",
+                    "output": "", "matches": []}
+        base = self._resolve(path)  # raises ToolError outside the root
+        if base.is_file():
+            candidates = [base]
+        elif base.is_dir():
+            candidates = sorted(p for p in base.rglob("*") if p.is_file())
+        else:
+            return {"ok": False, "error": f"no such path: {path}",
+                    "output": "", "matches": []}
+        matches: list[dict] = []
+        truncated = False
+        for f in candidates:
+            try:
+                resolved = f.resolve()
+            except OSError:
+                continue
+            if resolved != self.root and self.root not in resolved.parents:
+                continue  # symlink escaping the sandbox
+            try:
+                if f.stat().st_size > SEARCH_MAX_FILE_BYTES:
+                    continue
+                data = f.read_bytes()
+            except OSError:
+                continue
+            if b"\x00" in data[:8192]:
+                continue  # binary
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            rel = resolved.relative_to(self.root).as_posix()
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if query in line:
+                    matches.append({"path": rel, "line": lineno,
+                                    "text": line[:300]})
+                    if len(matches) >= SEARCH_MAX_RESULTS:
+                        truncated = True
+                        break
+            if truncated:
+                break
+        output = "\n".join(f"{m['path']}:{m['line']}: {m['text']}"
+                           for m in matches)
+        return {"ok": True, "output": output, "matches": matches,
+                "truncated": truncated}
+
     def write_file(self, path: str, content: str = "") -> dict:
         p = self._resolve(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return {"ok": True, "output": f"wrote {len(content)} chars to {path}"}
+
+    def append_file(self, path: str, content: str = "") -> dict:
+        """Append text exactly as given (no newline added). WRITE
+        class: governance pauses it for approval like write_file."""
+        p = self._resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(content)
+        return {"ok": True, "output": f"appended {len(content)} chars to {path}"}
 
     def shell(self, command: str, timeout: int = 15) -> dict:
         try:

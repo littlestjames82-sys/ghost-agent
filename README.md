@@ -67,11 +67,15 @@ is the only place tools may touch.
 * **Store** — JSON/JSONL store. Stable ids, timestamps, and memory
   provenance (source, verified flag, superseded_by).
 * **Governance** — every tool call is classified: `read_file`,
-  `list_dir`, `echo_note` auto-allow; `write_file` and `shell` require
-  human approval; unknown tools are denied by default. Deny marks the
-  step failed and stops the run honestly.
+  `list_dir`, `echo_note`, `search_files` auto-allow; `write_file`,
+  `append_file`, and `shell` require human approval; unknown tools
+  are denied by default. Deny marks the step failed and stops the
+  run honestly.
 * **Tools** — sandboxed to the workspace root: `read_file`, `list_dir`,
-  `echo_note` (read), `write_file` (write), `shell` (exec, timed out
+  `echo_note`, `search_files` (read — literal substring search with
+  file paths + line numbers, capped at 50 matches, binary and >1 MB
+  files skipped), `write_file`, `append_file` (write — raw append,
+  approval-gated exactly like a write), `shell` (exec, timed out
   and exit-code captured). Paths escaping the sandbox are refused.
 * **Agent loop** — plan, then per step: governance check, approval if
   needed, **record trail**, execute, verify (file exists / exact
@@ -103,8 +107,9 @@ is the only place tools may touch.
   permissions as badges, source task title, promote button),
   **Analytics** (honest counts from tasks + trail: status donut,
   approval outcome ratio, by model, steps, events by type with
-  percentages, the same 14-day activity chart; token/cost is
-  explicitly "not tracked yet" because tasks do not record it),
+  percentages, the same 14-day activity chart; since v0.6.0 also a
+  real Usage block — see "Usage accounting, import, and search
+  (v0.6.0)" below),
   **Logs** (live trail tail, type + severity filters, match count,
   search highlighting, pause/resume, download filtered events as
   JSON), **System** (version, home, workspace, model adapter,
@@ -160,15 +165,67 @@ is the only place tools may touch.
   attachment download. The export holds store data only, so it can
   never contain the dashboard token or a model API key.
 
+## Usage accounting, import, and search (v0.6.0)
+
+* **Real token/cost accounting.** When a provider response includes
+  a `usage` block, the numbers are recorded three ways: a
+  `model_usage` trail event per model call, cumulative
+  `usage_totals` / `usage_by_model` stored on the task, and
+  `/api/analytics`' `usage` block (totals + per-model breakdown).
+  MockModel calls record usage 0 with source `"mock"`, so the books
+  are honest about what is real. Cost is an **estimate only** for
+  models in the small built-in price table
+  (`MODEL_PRICING_USD_PER_MILLION`, longest prefix wins); any other
+  model's cost is reported as **unknown — never a guessed number**.
+  If some provider calls are unpriced, the total cost is unknown and
+  the priced part is shown separately as `known_estimated_cost_usd`.
+* **Safe import.** `POST /api/import` (System page file picker, or
+  the API; the token gate applies like everywhere) accepts an
+  export snapshot with hard safety semantics: imported memories and
+  skills land as **candidates only** (never trusted, provenance
+  source prefixed `import:`), imported schedules arrive
+  **disabled**, and imported tasks, approvals, and trail are stored
+  as **archived history** in separate collections — flagged
+  imported, never in the live lists, never re-run. Duplicate ids
+  are re-minted rather than overwriting existing records, with
+  internal references remapped. A malformed or wrong-shape snapshot
+  returns **400 and changes nothing** — the snapshot is validated
+  fully before the first write.
+* **search_files + planner patterns.** MockModel learned:
+  "find <text> in <path>" / "search <path> for <text>" →
+  `search_files`; "append <text> to <file>" → `append_file`
+  (write-class: it pauses for approval; the file is untouched until
+  approved); "summarize <file>" → a read step plus an honest note
+  that a real model would compose the summary — MockModel does not
+  fake summaries. Skills proposed from runs using the new tools
+  record them (and their permission class) correctly.
+* **Approvals on the activity chart.** The Overview 14-day chart
+  now carries a second, amber series: approvals decided per day
+  (`approvals_decided`, counted from the approval_granted /
+  approval_denied trail events that were already being recorded).
+* **Planner prompt guidance (live-run follow-up).** The first
+  live-model run (Muse Spark 1.3 via the Meta API) reached for a
+  shell grep/sed one-liner to mechanically "summarize" a file. The
+  run was governed correctly, but the prompt invited the shortcut.
+  The planner prompt now instructs the model to prefer `write_file`
+  with content it composes itself for write/summarize goals, to use
+  shell only when the goal explicitly asks for a command (or for
+  purely mechanical operations), and to order reads of source files
+  before any write that depends on them.
+
 ## Models
 
 * **MockModel (default in tests/demo)** — a deterministic, rule-based
   planner that pattern-matches a small set of phrasings
-  ("write X with: …", "read X", "run command: …", "demo"). It is
+  ("write X with: …", "read X", "run command: …", "demo", and since
+  v0.6.0 "find/search …", "append … to …", "summarize …"). It is
   **not intelligent**; it exists so the loop, governance, and trail
   can be exercised and tested without any provider.
 * **Real model (optional)** — an OpenAI-compatible adapter (urllib)
-  used when you supply your own key at runtime:
+  used when you supply your own key at runtime. Its planner prompt
+  carries the v0.6.0 guidance described above (compose with
+  write_file, shell only when asked, reads before dependent
+  writes), and its responses' `usage` blocks feed the accounting:
 
   ```sh
   export GHOST_AGENT_API_KEY=...        # your key; never stored or logged
@@ -206,14 +263,16 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v2.py -v   # v2 known-an
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v3.py -v   # v3 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v4.py -v   # v4 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v5.py -v   # v5 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v6.py -v   # v6 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
 See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2),
 [BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3),
-[BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4), and
-[BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5) for gate results and
+[BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4),
+[BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5), and
+[BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6) for gate results and
 counts.
 
 ## Design language (v0.5.0)
