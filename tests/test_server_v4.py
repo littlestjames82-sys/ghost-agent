@@ -191,7 +191,7 @@ def test_export_endpoint_shape(tmp_path):
     try:
         status, body = _req(base, "/api/export")
         assert status == 200
-        assert body["version"] == "0.8.0"
+        assert body["version"] == "0.9.0"
         assert len(body["tasks"]) == 1
         assert len(body["approvals"]) == 1
         assert len(body["skills"]) == 1

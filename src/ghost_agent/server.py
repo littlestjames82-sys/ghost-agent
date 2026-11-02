@@ -397,6 +397,7 @@ def system_payload(store: Store, agent: Agent, token: str | None,
         "host": host,
         "model_adapter": adapter,
         "model_name": model_name,
+        "token_budget": getattr(agent, "token_budget", None),
         "api_key_present": bool(os.environ.get("GHOST_AGENT_API_KEY")),
         "auth": {
             "token_required": bool(token),

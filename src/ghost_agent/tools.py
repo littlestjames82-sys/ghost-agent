@@ -9,7 +9,9 @@ read_project_file never leaves a registered project's local root.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 TOOL_KINDS = {
@@ -31,6 +33,11 @@ PROJECT_FILE_MAX_CHARS = 200_000
 PROJECT_FILE_TRUNCATION = ("\n[truncated: file is larger than the "
                            "200KB read cap]")
 GIT_TIMEOUT_SECONDS = 10
+# repo_status fallback facts for non-git trees (v0.9.0): the file
+# scan stops at this many files and reports the count as '10000+'.
+TREE_COUNT_CAP = 10_000
+# Root marker files (besides any README*) a tree can "carry".
+ROOT_MARKERS = ("BUILD_REPORT.md", "pyproject.toml", "package.json")
 
 
 def tool_kind(name: str) -> str | None:
@@ -214,10 +221,64 @@ class Tools:
             return None
         return proc.stdout.strip()
 
+    def _tree_facts(self, root: Path) -> dict:
+        """Facts about a project tree that is NOT a git
+        repository (v0.9.0): how many files it holds, when the
+        newest file was last modified, and which of the usual
+        root markers it carries. Most studio trees are API-synced
+        copies without .git — "not a git repository" alone left
+        repo_status with nothing true to say about them.
+
+        The scan is bounded: counting stops just past
+        TREE_COUNT_CAP files (the count is then reported as
+        '10000+') and the mtime scan stops with it. Files that
+        cannot be stat'ed are counted but contribute no mtime.
+        """
+        count = 0
+        capped = False
+        newest_ts: float | None = None
+        for dirpath, _dirs, filenames in os.walk(root):
+            for name in filenames:
+                count += 1
+                if count > TREE_COUNT_CAP:
+                    capped = True
+                    break
+                try:
+                    mtime = (Path(dirpath) / name).stat().st_mtime
+                except OSError:
+                    continue
+                if newest_ts is None or mtime > newest_ts:
+                    newest_ts = mtime
+            if capped:
+                break
+        markers: list[str] = []
+        try:
+            root_names = sorted(p.name for p in root.iterdir()
+                                if p.is_file())
+        except OSError:
+            root_names = []
+        readme = [n for n in root_names if n.startswith("README")]
+        if readme:
+            markers.append(readme[0])
+        for marker in ROOT_MARKERS:
+            if marker in root_names:
+                markers.append(marker)
+        return {
+            "file_count": TREE_COUNT_CAP if capped else count,
+            "file_count_capped": capped,
+            "newest_mtime": (datetime.fromtimestamp(
+                newest_ts, tz=timezone.utc).isoformat()
+                if newest_ts is not None else None),
+            "markers": markers,
+        }
+
     def repo_status(self, project: str) -> dict:
         """Status of one REGISTERED project: local tree presence,
-        git branch, dirty count, and last commit. Local facts
-        only — no network, no GitHub API (v0.8.0 scope)."""
+        git branch, dirty count, and last commit. A tree that is
+        not a git repository (the common studio case) instead
+        reports tree facts: file count, newest file mtime, and
+        the root markers it carries. Local facts only — no
+        network, no GitHub API (v0.8.0 scope)."""
         eco, err = self._registry()
         if err is not None:
             return err
@@ -238,12 +299,27 @@ class Tools:
                     "last_commit": None}
         root = Path(local_path).expanduser()
         if self._git(root, "rev-parse", "--git-dir") is None:
-            return {**base, "ok": True,
-                    "output": f"{name}: local tree at {local_path} is "
-                              f"not a git repository",
+            # Not a git repository — or git itself failed (missing
+            # binary, timeout). Either way the honest answer is
+            # tree facts, not invented git data (v0.9.0).
+            facts = self._tree_facts(root)
+            count_txt = (f"{TREE_COUNT_CAP}+" if facts["file_count_capped"]
+                         else str(facts["file_count"]))
+            output = (f"{name}: local tree at {local_path} is not a "
+                      f"git repository - {count_txt} file(s)")
+            if facts["newest_mtime"]:
+                output += f", newest modified {facts['newest_mtime']}"
+            carries = ", ".join(facts["markers"]) if facts["markers"] \
+                else "none of the usual markers"
+            output += f" - carries: {carries}"
+            return {**base, "ok": True, "output": output,
                     "has_local": True, "is_git_repo": False,
                     "branch": None, "dirty_count": None,
-                    "last_commit": None}
+                    "last_commit": None,
+                    "file_count": facts["file_count"],
+                    "file_count_capped": facts["file_count_capped"],
+                    "newest_mtime": facts["newest_mtime"],
+                    "markers": facts["markers"]}
         branch = self._git(root, "rev-parse", "--abbrev-ref", "HEAD") \
             or "unknown"
         porcelain = self._git(root, "status", "--porcelain")

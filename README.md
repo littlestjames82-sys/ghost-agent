@@ -324,6 +324,45 @@ step, and "status of <project>" plans a `repo_status` step — only
 for a name the registry actually holds (anything else falls
 through to the older patterns).
 
+## Token budget, tree facts, fuller records (v0.9.0)
+
+Three fixes from the Nov 2 live gauntlet and ecosystem probes:
+
+* **A per-task token budget.** The loop re-sends its history on
+  every call, so the gauntlet's document-heavy goals cost
+  35k–45k tokens each — and nothing stopped a run from spending
+  on. `GHOST_AGENT_TOKEN_BUDGET` now caps a task's total recorded
+  provider tokens: an integer, **default 100000**, with **0 or a
+  negative value disabling** the guardrail. Each task record
+  carries its `token_budget` (the cap, or null when disabled),
+  and `GET /api/system` reports the configured value. When a call
+  brings the total to the budget and the task still has work, it
+  stops *before* any further model call or tool execution:
+  status `failed`, error `token budget reached (<used> of
+  <budget> tokens)`, a `budget_exceeded` trail event carrying the
+  used/budget pair, and no skill proposal. A call that answers
+  "done" is not cut off — the work finished. MockModel records
+  zero usage and therefore never trips the budget: it guards
+  provider spend, and only provider spend.
+* **`repo_status` reports tree facts for non-git trees.** Most
+  studio trees are API-synced copies without `.git`, so
+  "not a git repository" was all v0.8.0 could say about them.
+  Now that answer also carries the tree's recursive **file
+  count** (the scan stops at 10,000 files and reports `10000+`),
+  the **newest file modification time** in ISO form, and a
+  `carries:` list of the usual root markers found — any
+  `README*`, `BUILD_REPORT.md`, `pyproject.toml`,
+  `package.json` — or `carries: none of the usual markers`. The
+  same fallback applies when the git commands themselves fail.
+  The git-repo answer (branch, dirty count, last commit) is
+  unchanged.
+* **Step outputs are stored fuller.** A task record used to keep
+  only the first 2,000 chars of a step's output, so a 72-project
+  `list_projects` result showed roughly 15 lines in the task
+  detail. The stored cap is now **8,000 chars**. (What the model
+  sees — the loop's history budget of 4,000 chars per output and
+  40,000 total — is a different budget and is unchanged.)
+
 ## Models
 
 * **MockModel (default in tests/demo)** — a deterministic, rule-based
@@ -389,6 +428,7 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v6.py -v   # v6 known-an
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7.py -v   # v7 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7b.py -v  # v7b live-fix gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v8.py -v   # v8 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v9.py -v   # v9 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
@@ -398,8 +438,9 @@ See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4),
 [BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5),
 [BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6),
-[BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7), and
-[BUILD_REPORT_V8.md](BUILD_REPORT_V8.md) (v8) for gate results and
+[BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7),
+[BUILD_REPORT_V8.md](BUILD_REPORT_V8.md) (v8), and
+[BUILD_REPORT_V9.md](BUILD_REPORT_V9.md) (v9) for gate results and
 counts.
 
 ## Design language (v0.5.0)

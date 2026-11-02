@@ -20,12 +20,24 @@ honesty: only a task's FIRST model call may fall back to
 MockModel; a later provider failure fails the task with the
 reason recorded — the brain never changes mid-task.
 
+Token budget (v0.9.0): a task's total recorded provider tokens
+are capped by GHOST_AGENT_TOKEN_BUDGET (default 100000; 0 or
+negative disables). The gauntlet showed why: the loop re-sends
+its history on every call, so document-heavy goals cost
+35k-45k tokens each and nothing stopped a run from spending on.
+When a call's usage brings the total to the budget and the task
+still has work, the task fails BEFORE any further model call or
+tool execution, with the reason in the trail. MockModel records
+zero usage and never trips it — the budget guards provider
+spend, and only provider spend.
+
 Record-before-execute is a hard rule: the trail record for a tool
 execution is written (flush + fsync) BEFORE the tool runs. If that
 write fails, the action does NOT execute and the run fails honestly.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from . import governance
@@ -39,6 +51,25 @@ MAX_STEPS = 12            # executed steps per task, hard cap
 VALIDATION_RETRY_CAP = 2  # corrected-step requests per task
 HISTORY_OUTPUT_CHARS = 4000   # per-step output kept in history
 HISTORY_TOTAL_CHARS = 40000   # total history budget, outputs elided first
+STEP_OUTPUT_CHARS = 8000      # per-step output stored on the task record
+TOKEN_BUDGET_ENV = "GHOST_AGENT_TOKEN_BUDGET"
+DEFAULT_TOKEN_BUDGET = 100_000  # per-task provider tokens, when unset
+
+
+def configured_token_budget() -> int | None:
+    """The per-task provider-token budget from
+    GHOST_AGENT_TOKEN_BUDGET: an integer cap, defaulting to
+    DEFAULT_TOKEN_BUDGET when unset. 0 or negative disables the
+    guardrail (returns None); an unparseable value falls back to
+    the default rather than crashing startup."""
+    raw = os.environ.get(TOKEN_BUDGET_ENV)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_TOKEN_BUDGET
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return DEFAULT_TOKEN_BUDGET
+    return value if value > 0 else None
 
 
 class Agent:
@@ -53,6 +84,10 @@ class Agent:
         self.ecosystem = get_ecosystem(store)
         self.tools = Tools(workspace or store.workspace,
                            ecosystem=self.ecosystem)
+        # The per-task token budget (v0.9.0), resolved from the
+        # environment at construction; None when disabled. It is
+        # stamped onto every task this agent creates.
+        self.token_budget = configured_token_budget()
         mock = getattr(self.router, "mock", None)
         if mock is not None:
             mock.ecosystem = self.ecosystem
@@ -188,6 +223,9 @@ class Agent:
             "plan_calls": 1,
             "loop_repeats": 0,
             "validation_retries": 0,
+            # The token budget this task runs under (v0.9.0):
+            # the configured cap, or None when disabled.
+            "token_budget": self.token_budget,
             # Usage accounting (v0.6.0 shape): cumulative across
             # ALL of the task's model calls, plus per-model detail.
             "usage_totals": {
@@ -201,6 +239,14 @@ class Agent:
         }
         if first["usage"] is not None:
             self._apply_usage(task, first["usage"])
+        # A first call can already exhaust the budget (one huge
+        # provider answer). If the task still has work, it fails
+        # here — before any tool executes.
+        budget_failed = bool(not first["done"]
+                             and self._budget_tripped(task))
+        if budget_failed:
+            task["status"] = "failed"
+            task["error"] = self._budget_reason(task)
         task = self.store.put("tasks", task)
         self.store.try_trail(
             "replan",
@@ -217,6 +263,12 @@ class Agent:
                                  task_id=task["id"])
         self.store.try_trail("task_created", {"goal": goal},
                              task_id=task["id"])
+        if budget_failed:
+            self.store.try_trail(
+                "budget_exceeded",
+                {"used": task["usage_totals"]["total_tokens"],
+                 "budget": task["token_budget"]},
+                task_id=task["id"])
         return task
 
     # ---- approvals ---------------------------------------------------------
@@ -280,6 +332,36 @@ class Agent:
         task = self.store.update("tasks", task["id"], status="failed",
                                  error=reason)
         self.store.try_trail(event_type, {"reason": reason},
+                             task_id=task["id"])
+        return task
+
+    # ---- token budget (v0.9.0) -------------------------------------------
+    @staticmethod
+    def _budget_tripped(task: dict) -> bool:
+        """True when the task carries an enabled budget and its
+        recorded provider usage has reached it. MockModel usage is
+        zero, so mock tasks never trip — by design."""
+        budget = task.get("token_budget")
+        if not budget:
+            return False
+        used = (task.get("usage_totals") or {}).get("total_tokens", 0)
+        return used >= budget
+
+    @staticmethod
+    def _budget_reason(task: dict) -> str:
+        used = (task.get("usage_totals") or {}).get("total_tokens", 0)
+        return f"token budget reached ({used} of {task.get('token_budget')} tokens)"
+
+    def _fail_budget(self, task: dict) -> dict:
+        """Fail a task that reached its token budget, with a
+        dedicated budget_exceeded trail event carrying the
+        used/budget pair."""
+        used = (task.get("usage_totals") or {}).get("total_tokens", 0)
+        budget = task.get("token_budget")
+        task = self.store.update("tasks", task["id"], status="failed",
+                                 error=self._budget_reason(task))
+        self.store.try_trail("budget_exceeded",
+                             {"used": used, "budget": budget},
                              task_id=task["id"])
         return task
 
@@ -393,7 +475,7 @@ class Agent:
             task = self.store.get("tasks", task_id)
             steps = task["steps"]
             steps[idx]["result"] = {"ok": result.get("ok"),
-                                    "output": (result.get("output") or "")[:2000],
+                                    "output": (result.get("output") or "")[:STEP_OUTPUT_CHARS],
                                     "exit_code": result.get("exit_code")}
             if not ok:
                 steps[idx]["status"] = "failed"
@@ -455,6 +537,18 @@ class Agent:
                 updates["usage_totals"] = task["usage_totals"]
                 updates["usage_by_model"] = task["usage_by_model"]
                 updates["usage_source"] = task["usage_source"]
+            # Token budget (v0.9.0): this call's usage is recorded;
+            # if it reached the budget and the model still has a
+            # step to run, stop NOW — before that step executes and
+            # before any further model call. A "done" answer is
+            # not tripped: the work is finished, not cut off.
+            if nxt["step"] is not None and self._budget_tripped(task):
+                task = self.store.update("tasks", task_id, **updates)
+                if nxt["usage"] is not None:
+                    self.store.try_trail("model_usage",
+                                         dict(nxt["usage"]),
+                                         task_id=task_id)
+                return self._fail_budget(task)
             if nxt["done"] or nxt["step"] is None:
                 updates["planning_done"] = True
                 task = self.store.update("tasks", task_id, **updates)
