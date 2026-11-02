@@ -119,6 +119,11 @@ class MockModel:
         self.last_usage = usage_record(
             "mock", "mock",
             {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        # The ecosystem registry (ghost_agent.ecosystem.Ecosystem),
+        # wired in by the Agent so the 'status of <project>'
+        # pattern can name only projects the registry holds.
+        # None in bare unit use — the pattern then falls through.
+        self.ecosystem = None
 
     def plan(self, goal: str) -> list[dict]:
         self.last_usage = usage_record(
@@ -155,6 +160,21 @@ class MockModel:
             return [{"tool": "search_files",
                      "args": {"query": m.group(2).strip(), "path": m.group(1)},
                      "verify": {"type": "ok"}}]
+        # ecosystem (v0.8.0): 'list projects' / any goal mentioning
+        # the ecosystem -> the registry listing; 'status of <name>'
+        # -> repo_status, but only for a name the registry actually
+        # holds (an unregistered name falls through to the generic
+        # patterns below rather than planning a doomed step).
+        if "list projects" in lower or "ecosystem" in lower:
+            return [{"tool": "list_projects", "args": {},
+                     "verify": {"type": "ok"}}]
+        m = re.search(r"status of\s+([A-Za-z0-9_.\-]+)", text, re.IGNORECASE)
+        if m and self.ecosystem is not None:
+            entry = self.ecosystem.get(m.group(1))
+            if entry is not None:
+                return [{"tool": "repo_status",
+                         "args": {"project": entry["name"]},
+                         "verify": {"type": "ok"}}]
         steps: list[dict] = []
         # append <text> to <file>: a WRITE-class step (append_file),
         # so it pauses for approval exactly like write_file.
@@ -233,11 +253,14 @@ TOOL_SIGNATURES = (
     "Tools and their exact args (use exactly these names): "
     "read_file{path}, list_dir{path}, echo_note{text}, "
     "search_files{query, path?}, write_file{path, content}, "
-    "append_file{path, content}, shell{command}."
+    "append_file{path, content}, shell{command}, "
+    "list_projects{layer?}, repo_status{project}, "
+    "read_project_file{project, path}."
 )
 
 TOOL_NAMES = ("read_file,list_dir,echo_note,search_files,"
-              "write_file,append_file,shell")
+              "write_file,append_file,shell,"
+              "list_projects,repo_status,read_project_file")
 
 
 def build_planner_prompt(goal: str) -> str:
@@ -252,7 +275,7 @@ def build_planner_prompt(goal: str) -> str:
     return (
         "You are a planner. Reply with ONLY a JSON array of steps. "
         "Each step: {\"tool\": one of "
-        "read_file,list_dir,echo_note,search_files,write_file,append_file,shell, "
+        + TOOL_NAMES + ", "
         "\"args\": {...}, \"verify\": {\"type\": \"ok\"}}. "
         + TOOL_SIGNATURES + " "
         + PLANNER_GUIDANCE + " Goal: " + goal

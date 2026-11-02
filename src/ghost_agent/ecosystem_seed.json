@@ -1,0 +1,578 @@
+[
+  {
+    "name": "ghost-kernel",
+    "repo": "littlestjames82-sys/ghost-kernel",
+    "local_path": "/home/hatch/workspace/ghost",
+    "layer": "kernel",
+    "role": "Provider-neutral kernel: world model, event graph with provenance, verification engines, permissioned Action Fabric, Continuity Engine",
+    "source": "repo+role: github-repo-audit-2026-11-01.md (your_files) private-repo note; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Memory/Brain layer); local build tree ~/workspace/ghost per MEMORY.md (~/workspace/ghost-kernel is the design pack)"
+  },
+  {
+    "name": "agent-seatbelt",
+    "repo": "littlestjames82-sys/agent-seatbelt",
+    "local_path": "/home/hatch/workspace/agent-seatbelt",
+    "layer": "law",
+    "role": "Agent action-policy layer: governs what an agent does (policy, approvals, tamper-evident log)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md mains; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Law)"
+  },
+  {
+    "name": "ghostguard",
+    "repo": "littlestjames82-sys/ghostguard",
+    "local_path": "/home/hatch/workspace/ghostguard",
+    "layer": "law",
+    "role": "Governance core: 9 permission classes, classify + record-before-execute + approval gating",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role+layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Law layer; 04-core-governance board)"
+  },
+  {
+    "name": "ghostguard-budgets",
+    "repo": "littlestjames82-sys/ghostguard-budgets",
+    "local_path": "/home/hatch/workspace/ghostguard-budgets",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-distribution",
+    "repo": "littlestjames82-sys/ghostguard-distribution",
+    "local_path": "/home/hatch/workspace/ghostguard-distribution",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-mcp",
+    "repo": "littlestjames82-sys/ghostguard-mcp",
+    "local_path": "/home/hatch/workspace/ghostguard-mcp",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-plan",
+    "repo": "littlestjames82-sys/ghostguard-plan",
+    "local_path": "/home/hatch/workspace/ghostguard-plan",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-replay",
+    "repo": "littlestjames82-sys/ghostguard-replay",
+    "local_path": "/home/hatch/workspace/ghostguard-replay",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-reports",
+    "repo": "littlestjames82-sys/ghostguard-reports",
+    "local_path": "/home/hatch/workspace/ghostguard-reports",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-secrets",
+    "repo": "littlestjames82-sys/ghostguard-secrets",
+    "local_path": "/home/hatch/workspace/ghostguard-secrets",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-services",
+    "repo": "littlestjames82-sys/ghostguard-services",
+    "local_path": "/home/hatch/workspace/ghostguard-services",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "ghostguard-voice",
+    "repo": "littlestjames82-sys/ghostguard-voice",
+    "local_path": "/home/hatch/workspace/ghostguard-voice",
+    "layer": "law",
+    "role": "GhostGuard family add-on (the family is the core plus nine add-ons, one security family)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); family: ghostslice-companions/ECOSYSTEM.md mains ('core plus nine add-ons'); layer follows GhostGuard in ghost-roadmaps-build/build.py stack board (03-the-stack)"
+  },
+  {
+    "name": "policy-packs",
+    "repo": "littlestjames82-sys/policy-packs",
+    "local_path": "/home/hatch/workspace/policy-packs",
+    "layer": "law",
+    "role": "Policy pack presets for governed agent runs (readonly / standard / strict presets)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: MEMORY.md Ghost Hands v0.4 policy packs; layer inferred from governance role - see PREP_NOTES caveat"
+  },
+  {
+    "name": "ghostlang",
+    "repo": "littlestjames82-sys/ghostlang",
+    "local_path": "/home/hatch/workspace/ghostlang-src",
+    "layer": "language",
+    "role": "Governed agent language: readable .ghst contracts (can/cannot, budget, kill switch, ask-before-act); language + runtime layer over the stack",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files) private-repo note; role+layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Language); local source tree ~/workspace/ghostlang-src (~/workspace/ghostlang is the design pack, per workspace listing 2026-11-02 + pack/build split pattern in MEMORY.md)"
+  },
+  {
+    "name": "ghostbus",
+    "repo": "littlestjames82-sys/ghostbus",
+    "local_path": "/home/hatch/workspace/ghostbus",
+    "layer": "rails",
+    "role": "Agent transport: agents message, hand off work, and post/claim tasks with proof trails",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md mains; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Rails)"
+  },
+  {
+    "name": "ghost-bridge",
+    "repo": "littlestjames82-sys/ghost-bridge",
+    "local_path": "/home/hatch/workspace/ghost-bridge",
+    "layer": "rails",
+    "role": "Hosted relay connecting the ecosystem pieces (Level 3 relay + MCP store)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md mains; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Rails)"
+  },
+  {
+    "name": "ghost-bridge-queue",
+    "repo": "littlestjames82-sys/ghost-bridge-queue",
+    "local_path": null,
+    "layer": "rails",
+    "role": "Ghost Bridge relay queue: tasks from Google Antigravity to Mr.Ghosty arrive as labeled GitHub issues, comments are results",
+    "source": "repo+role: github-repo-audit-2026-11-01.md (your_files) private-repo note; layer follows Ghost Bridge in ghost-roadmaps-build/build.py stack board (03-the-stack); no local tree found in workspace listing 2026-11-02"
+  },
+  {
+    "name": "ghostdeploy",
+    "repo": "littlestjames82-sys/ghostdeploy",
+    "local_path": "/home/hatch/workspace/ghostdeploy-src",
+    "layer": "hosting",
+    "role": "Governed hosting platform: governed deploys with record-before-execute (D1 internal MVP built)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files) private-repo note; role: ghostslice-companions/ECOSYSTEM.md mains; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Hosting); local source tree ~/workspace/ghostdeploy-src (~/workspace/ghostdeploy is the design pack)"
+  },
+  {
+    "name": "ghost-hands",
+    "repo": "littlestjames82-sys/ghost-hands",
+    "local_path": "/home/hatch/workspace/ghost-hands",
+    "layer": "bodies",
+    "role": "The governed browser body: own stdlib CDP driver, classify + record-before-execute + approval, trail-to-script replay",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md mains ('the governed browser body'); layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Bodies)"
+  },
+  {
+    "name": "ghost-hands-mobile",
+    "repo": "littlestjames82-sys/ghost-hands-mobile",
+    "local_path": "/home/hatch/workspace/ghost-hands-mobile",
+    "layer": "bodies",
+    "role": "Governed Android body (MrGhosty on the phone): on-device goal-driven agent with a locally trained planner",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-roadmaps-build/build.py stack board (03-the-stack) (Bodies: MrGhosty phone/voice) + MEMORY.md v3.x record; layer: bodies"
+  },
+  {
+    "name": "ghost-os",
+    "repo": null,
+    "local_path": "/home/hatch/workspace/ghost-os",
+    "layer": "bodies",
+    "role": "GhostOS: a Linux/Android OS run by the Ghost Kernel (phone body for the stack)",
+    "source": "no repo in github-repo-audit-2026-11-01.md (your_files) or MEMORY.md; local tree: workspace listing 2026-11-02; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Bodies lists GhostOS)"
+  },
+  {
+    "name": "ghost-agent",
+    "repo": "littlestjames82-sys/ghost-agent",
+    "local_path": "/home/hatch/workspace/ghost-agent",
+    "layer": "products",
+    "role": "Hermes-style persistent governed operator for the studio (runtime + dashboard + Android app); the hub this registry seeds",
+    "source": "repo: MEMORY.md (pushed Nov 1, 2026, commits through v0.6.0) - ABSENT from github-repo-audit-2026-11-01.md (your_files), see PREP_NOTES conflict 1; local tree: workspace listing 2026-11-02; layer is a judgment call, see PREP_NOTES"
+  },
+  {
+    "name": "ghostcut",
+    "repo": "littlestjames82-sys/ghostcut",
+    "local_path": "/home/hatch/workspace/ghostcut",
+    "layer": "products",
+    "role": "Video editor product (OpenCut-classic rebrand, client-side editor + APK)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files) private-repo note; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Products)"
+  },
+  {
+    "name": "ghostchat",
+    "repo": "littlestjames82-sys/ghostchat",
+    "local_path": "/home/hatch/workspace/ghostchat",
+    "layer": "products",
+    "role": "Customer-chat product (Chatwoot rebrand)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files) (also listed there as one of Ryan's forks, of Chatwoot); layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Products)"
+  },
+  {
+    "name": "storefront",
+    "repo": "littlestjames82-sys/storefront",
+    "local_path": "/home/hatch/workspace/storefront",
+    "layer": "products",
+    "role": "Storefront product: websites/storefronts for local businesses (live on Netlify)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Products, marked LIVE)"
+  },
+  {
+    "name": "decksmith",
+    "repo": "littlestjames82-sys/decksmith",
+    "local_path": "/home/hatch/workspace/decksmith-repo",
+    "layer": "products",
+    "role": "Cyberdeck design/fabrication studio product (web app + Android APK)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Products); local tree ~/workspace/decksmith-repo per MEMORY.md"
+  },
+  {
+    "name": "after-hours-front-desk",
+    "repo": "littlestjames82-sys/after-hours-front-desk",
+    "local_path": "/home/hatch/workspace/after-hours-front-desk",
+    "layer": "products",
+    "role": "After Hours front-desk product (after-hours answering/front-desk venture)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Products lists 'After Hours'); local tree: workspace listing 2026-11-02"
+  },
+  {
+    "name": "loadmaster",
+    "repo": "littlestjames82-sys/loadmaster",
+    "local_path": "/home/hatch/workspace/loadmaster",
+    "layer": "products",
+    "role": "Photo-based load safety checker (SAM 3.1 + 49 CFR 393 rules + Spark report); Meta hackathon entry",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: MEMORY.md LoadMaster record; layer assigned products (post-dates the Oct 10 stack board); second local location under the hackathon goal workspace, see PREP_NOTES"
+  },
+  {
+    "name": "ghost-ide",
+    "repo": "littlestjames82-sys/ghost-ide",
+    "local_path": "/home/hatch/workspace/ghost-ide",
+    "layer": "products",
+    "role": "GhostIDE: the studio's offline IDE (desktop server + phone app, ecosystem tools built in)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: MEMORY.md GhostIDE record + ghost-ide/ROADMAP_ECO.md (the IDE hosts the ecosystem); layer is a judgment call, see PREP_NOTES"
+  },
+  {
+    "name": "ghostide-android",
+    "repo": "littlestjames82-sys/ghostide-android",
+    "local_path": "/home/hatch/workspace/ghostide-apk-build",
+    "layer": "products",
+    "role": "GhostIDE's Android app repo (the phone build of GhostIDE)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); local build tree ~/workspace/ghostide-apk-build per MEMORY.md (pushes recorded from it)"
+  },
+  {
+    "name": "devpulse",
+    "repo": null,
+    "local_path": "/home/hatch/workspace/devpulse",
+    "layer": "products",
+    "role": "DevPulse product (deploy parked by Ryan; APK built, backend not deployed)",
+    "source": "no repo in github-repo-audit-2026-11-01.md (your_files); local tree: workspace listing 2026-11-02; layer: ghost-roadmaps-build/build.py stack board (03-the-stack) (Products) + MEMORY.md parked status"
+  },
+  {
+    "name": "ghostslice",
+    "repo": "littlestjames82-sys/ghostslice",
+    "local_path": "/home/hatch/workspace/ghostslice",
+    "layer": "tools",
+    "role": "Context slicing: governs what an agent reads (stdlib-only context/prompt optimizer core)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md mains; family: ghost-ide/ROADMAP_ECO.md"
+  },
+  {
+    "name": "ghostverify",
+    "repo": "littlestjames82-sys/ghostverify",
+    "local_path": "/home/hatch/workspace/ghostverify",
+    "layer": "tools",
+    "role": "Verification evidence contract: what was executed vs only claimed, gaps named as gaps",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E7"
+  },
+  {
+    "name": "ghostbench",
+    "repo": "littlestjames82-sys/ghostbench",
+    "local_path": "/home/hatch/workspace/ghostbench",
+    "layer": "tools",
+    "role": "Benchmark runner for agent/tool runs (Tier A contained diffing, Tier B live-agent writer)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md Proof category + MEMORY.md GhostBench record"
+  },
+  {
+    "name": "ghostworkflow",
+    "repo": "littlestjames82-sys/ghostworkflow",
+    "local_path": "/home/hatch/workspace/ghostworkflow",
+    "layer": "tools",
+    "role": "Workflow CLI: the runner GhostConsole invokes to execute workflow engines",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: MEMORY.md Oct 18, 2026 (GhostConsole invokes only the ghostworkflow CLI; one of six CI-green product repos)"
+  },
+  {
+    "name": "ghostconsole",
+    "repo": "littlestjames82-sys/ghostconsole",
+    "local_path": "/home/hatch/workspace/ghostconsole",
+    "layer": "tools",
+    "role": "Read-only ecosystem board aggregating every tool's latest report (kanban: Verified / Attention / Stale)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E17"
+  },
+  {
+    "name": "ghostconsole-app",
+    "repo": "littlestjames82-sys/ghostconsole-app",
+    "local_path": "/home/hatch/workspace/ghostconsole-app",
+    "layer": "tools",
+    "role": "GhostConsole web app with a standalone Android companion (bundled boards, PC-connect mode)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: MEMORY.md ghostconsole-app record; family: ghost-ide/ROADMAP_ECO.md E17"
+  },
+  {
+    "name": "ghostapprove",
+    "repo": "littlestjames82-sys/ghostapprove",
+    "local_path": "/home/hatch/workspace/ghostapprove",
+    "layer": "tools",
+    "role": "Approval queue for consequential agent actions; queue-only, never executes on its own",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E10 + rules"
+  },
+  {
+    "name": "ghostatlas",
+    "repo": "littlestjames82-sys/ghostatlas",
+    "local_path": "/home/hatch/workspace/ghostatlas",
+    "layer": "tools",
+    "role": "Repo atlas: a map view of a project for agent context",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E5"
+  },
+  {
+    "name": "ghostconvert",
+    "repo": "littlestjames82-sys/ghostconvert",
+    "local_path": "/home/hatch/workspace/ghostconvert",
+    "layer": "tools",
+    "role": "Exports a slice bundle as AGENTS.md, Cursor rules, or Copilot instructions, with conversion losses named",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E6"
+  },
+  {
+    "name": "ghostdata",
+    "repo": "littlestjames82-sys/ghostdata",
+    "local_path": "/home/hatch/workspace/ghostdata",
+    "layer": "tools",
+    "role": "Data-file slicer: CSV/TSV/JSON schema + bounded sample with sensitive columns redacted",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E14 + ghostslice-companions/ECOSYSTEM.md non-code slicers"
+  },
+  {
+    "name": "ghostdeps",
+    "repo": "littlestjames82-sys/ghostdeps",
+    "local_path": "/home/hatch/workspace/ghostdeps",
+    "layer": "tools",
+    "role": "Declared vs actually-imported dependencies; evidence only, no network calls, no vuln verdicts",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E12 + rules"
+  },
+  {
+    "name": "ghostdocs",
+    "repo": "littlestjames82-sys/ghostdocs",
+    "local_path": "/home/hatch/workspace/ghostdocs",
+    "layer": "tools",
+    "role": "Non-code documentation slicer (covered natively in GhostIDE docs mode)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md non-code slicers + ghost-ide/ROADMAP_ECO.md not-in-roadmap note"
+  },
+  {
+    "name": "ghostenv",
+    "repo": "littlestjames82-sys/ghostenv",
+    "local_path": "/home/hatch/workspace/ghostenv",
+    "layer": "tools",
+    "role": ".env audit: variable names only, values never shown",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E11 + rules"
+  },
+  {
+    "name": "ghostexposure",
+    "repo": "littlestjames82-sys/ghostexposure",
+    "local_path": "/home/hatch/workspace/ghostexposure",
+    "layer": "tools",
+    "role": "Exposure evidence pack for a change; evidence only, no verdicts",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E9 + rules"
+  },
+  {
+    "name": "ghostfixture",
+    "repo": "littlestjames82-sys/ghostfixture",
+    "local_path": "/home/hatch/workspace/ghostfixture",
+    "layer": "tools",
+    "role": "Fixture-faithful project generation (folds into the recipes system)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md not-in-roadmap note + ghostslice-companions/ECOSYSTEM.md packaging category"
+  },
+  {
+    "name": "ghosthandoff",
+    "repo": "littlestjames82-sys/ghosthandoff",
+    "local_path": "/home/hatch/workspace/ghosthandoff",
+    "layer": "tools",
+    "role": "Propose-only handoff packs built from repo facts",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E4"
+  },
+  {
+    "name": "ghostindex",
+    "repo": "littlestjames82-sys/ghostindex",
+    "local_path": "/home/hatch/workspace/ghostindex",
+    "layer": "tools",
+    "role": "Offline FTS5 whole-workspace search returning token-budgeted sliced excerpts",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E3"
+  },
+  {
+    "name": "ghostleads",
+    "repo": "littlestjames82-sys/ghostleads",
+    "local_path": "/home/hatch/workspace/ghostleads",
+    "layer": "tools",
+    "role": "Offline lead drafts for the studio; drafts only, Ryan sends",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E19 + ghostslice-companions/ECOSYSTEM.md business tools"
+  },
+  {
+    "name": "ghostledger",
+    "repo": "littlestjames82-sys/ghostledger",
+    "local_path": "/home/hatch/workspace/ghostledger",
+    "layer": "tools",
+    "role": "Session token ledger (a card on the GhostConsole board)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E17"
+  },
+  {
+    "name": "ghostlift",
+    "repo": "littlestjames82-sys/ghostlift",
+    "local_path": "/home/hatch/workspace/ghostlift",
+    "layer": "tools",
+    "role": "Lifts compiled artifacts (JS source maps, Python .pyc) back to readable source Slice can scan; never executes what it lifts",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ecosystem/CATALOG.md row 13 + ghostslice-companions/ECOSYSTEM.md context-preparation category"
+  },
+  {
+    "name": "ghostlogs",
+    "repo": "littlestjames82-sys/ghostlogs",
+    "local_path": "/home/hatch/workspace/ghostlogs",
+    "layer": "tools",
+    "role": "Slices logs into incident packs (error windows plus deduped repeats)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E13"
+  },
+  {
+    "name": "ghostmcpdoctor",
+    "repo": "littlestjames82-sys/ghostmcpdoctor",
+    "local_path": "/home/hatch/workspace/ghostmcpdoctor",
+    "layer": "tools",
+    "role": "GhostMCP Doctor: read-only MCP diagnostics (a card on the GhostConsole board)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E17 + ghostslice-companions/ECOSYSTEM.md agent-ops category"
+  },
+  {
+    "name": "ghostpacks",
+    "repo": "littlestjames82-sys/ghostpacks",
+    "local_path": "/home/hatch/workspace/ghostpacks",
+    "layer": "tools",
+    "role": "Shareable Slice profile packs as data, with a local manager and scored starter packs; data only, no network",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ecosystem/CATALOG.md row 11 + ghostslice-companions/ECOSYSTEM.md packaging category"
+  },
+  {
+    "name": "ghostport",
+    "repo": "littlestjames82-sys/ghostport",
+    "local_path": "/home/hatch/workspace/ghostport",
+    "layer": "tools",
+    "role": "One-shot migration CLI (stays a CLI by design)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md not-in-roadmap note + ghostslice-companions/ECOSYSTEM.md change/review/migration category"
+  },
+  {
+    "name": "ghostprimer",
+    "repo": "littlestjames82-sys/ghostprimer",
+    "local_path": "/home/hatch/workspace/ghostprimer",
+    "layer": "tools",
+    "role": "Builds a starter context bundle that primes a fresh agent session",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E4"
+  },
+  {
+    "name": "ghostproxy",
+    "repo": "littlestjames82-sys/ghostproxy",
+    "local_path": "/home/hatch/workspace/ghostproxy",
+    "layer": "tools",
+    "role": "Live-traffic proxy tool; fail-open, never stores keys (kept out of GhostIDE for breaking the offline promise)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghostslice-companions/ECOSYSTEM.md live-traffic category + ghost-ide/ROADMAP_ECO.md not-in-roadmap note"
+  },
+  {
+    "name": "ghostrecall",
+    "repo": "littlestjames82-sys/ghostrecall",
+    "local_path": "/home/hatch/workspace/ghostrecall",
+    "layer": "tools",
+    "role": "Recall of prior slices and sessions for a project, token-budgeted",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E5"
+  },
+  {
+    "name": "ghostrecipes",
+    "repo": "littlestjames82-sys/ghostrecipes",
+    "local_path": "/home/hatch/workspace/ghostrecipes",
+    "layer": "tools",
+    "role": "Recipes shipped as .ghostpack template packs: scaffold plus wired checks",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E18"
+  },
+  {
+    "name": "ghostreplay",
+    "repo": "littlestjames82-sys/ghostreplay",
+    "local_path": "/home/hatch/workspace/ghostreplay",
+    "layer": "tools",
+    "role": "Session replay and transcript analysis for exported agent sessions",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E16"
+  },
+  {
+    "name": "ghostreview",
+    "repo": "littlestjames82-sys/ghostreview",
+    "local_path": "/home/hatch/workspace/ghostreview",
+    "layer": "tools",
+    "role": "Pre-commit review verdict layer over a working-tree diff (secret-shaped lines flagged, values never shown)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E8"
+  },
+  {
+    "name": "ghostschema",
+    "repo": "littlestjames82-sys/ghostschema",
+    "local_path": "/home/hatch/workspace/ghostschema",
+    "layer": "tools",
+    "role": "OpenAPI / JSON Schema outlines sliced by $ref reachability",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E14"
+  },
+  {
+    "name": "ghostscope",
+    "repo": "littlestjames82-sys/ghostscope",
+    "local_path": "/home/hatch/workspace/ghostscope",
+    "layer": "tools",
+    "role": "Scope analysis: what a change touches (files and symbols)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E9"
+  },
+  {
+    "name": "ghostshard",
+    "repo": "littlestjames82-sys/ghostshard",
+    "local_path": "/home/hatch/workspace/ghostshard",
+    "layer": "tools",
+    "role": "Planner-only planning tool; dispatch is forbidden by its own design rule",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md rules + ghostslice-companions/ECOSYSTEM.md context-preparation category"
+  },
+  {
+    "name": "ghostwatch",
+    "repo": "littlestjames82-sys/ghostwatch",
+    "local_path": "/home/hatch/workspace/ghostwatch",
+    "layer": "tools",
+    "role": "Freshness feed: changes made outside the IDE appear live",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E16"
+  },
+  {
+    "name": "ghostworktree",
+    "repo": "littlestjames82-sys/ghostworktree",
+    "local_path": "/home/hatch/workspace/ghostworktree",
+    "layer": "tools",
+    "role": "Git worktree management so an agent can work a second tree",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E15"
+  },
+  {
+    "name": "quoteshot",
+    "repo": "littlestjames82-sys/quoteshot",
+    "local_path": "/home/hatch/workspace/quoteshot",
+    "layer": "tools",
+    "role": "Offline quote sheets generated from the studio price book",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); role: ghost-ide/ROADMAP_ECO.md E19 + ghostslice-companions/ECOSYSTEM.md business tools"
+  },
+  {
+    "name": "ghost-roadmaps",
+    "repo": "littlestjames82-sys/ghost-roadmaps",
+    "local_path": "/home/hatch/workspace/ghost-roadmaps-build",
+    "layer": "other",
+    "role": "The studio's roadmap and status boards (generated boards repo)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); local tree is the generator ~/workspace/ghost-roadmaps-build (ghost-roadmaps-build/build.py stack board (03-the-stack) lives there; rendered boards in ~/workspace/your_files/ghost-roadmaps)"
+  },
+  {
+    "name": "awesome-mcp-servers",
+    "repo": "littlestjames82-sys/awesome-mcp-servers",
+    "local_path": null,
+    "layer": "other",
+    "role": "Ryan's fork of the awesome-mcp-servers list, used for the Ghost Hands listing PR",
+    "source": "repo+role: github-repo-audit-2026-11-01.md (your_files) forks section; no local tree in workspace listing 2026-11-02"
+  },
+  {
+    "name": "useagent",
+    "repo": "littlestjames82-sys/useagent",
+    "local_path": "/home/hatch/workspace/useagent",
+    "layer": "other",
+    "role": "UseAgent repo: Ryan's fork used for Hacktoberfest PRs (all four merged)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files) forks section; local tree: workspace listing 2026-11-02; role detail: MEMORY.md"
+  },
+  {
+    "name": "littlestjames82-sys",
+    "repo": "littlestjames82-sys/littlestjames82-sys",
+    "local_path": null,
+    "layer": "other",
+    "role": "The GitHub account profile repo (repo named after the account)",
+    "source": "repo: github-repo-audit-2026-11-01.md (your_files); no confirmed local tree (a ~/workspace/github-profile dir exists but no source ties it to this repo)"
+  },
+  {
+    "name": "ghost-agent-android",
+    "repo": null,
+    "local_path": "/home/hatch/workspace/ghost-agent-android",
+    "layer": "other",
+    "role": "Android app for Ghost Agent: standalone on-phone mode plus computer-connect mode (v1.2.0)",
+    "source": "no repo in github-repo-audit-2026-11-01.md (your_files) or MEMORY.md; local tree: workspace listing 2026-11-02 + MEMORY.md Android record; the app ships inside the Ghost Agent project, not its own repo"
+  }
+]

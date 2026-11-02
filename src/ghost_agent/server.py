@@ -34,6 +34,15 @@ The brand mark is Ryan's Ghost Agent icon
 /assets/ghost-agent-icon.jpg; the CSS "G" tile is the fallback when
 the file is absent).
 
+v0.8.0 adds the Ecosystem page (the 12th): the studio's project
+registry (GHOST_AGENT_HOME/ecosystem.json, seeded from the bundled
+72-project registry on first run) rendered as shelves by stack
+layer, backed by GET /api/ecosystem with each project's local-tree
+presence computed live. The registry also backs three read-class
+tools — list_projects, repo_status, read_project_file — and the
+export carries it under "ecosystem" (import ignores that key: the
+registry is machine-local config, never portable data).
+
 Auth (Hermes-style, fail-closed):
 - Loopback bind: no token needed (the v1 posture; warning banner).
 - Non-loopback bind: GHOST_AGENT_DASHBOARD_TOKEN MUST be set or the
@@ -57,6 +66,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .agent import Agent
+from .ecosystem import LAYER_ORDER, get_ecosystem
 from .memory import Memory
 from .scheduler import create_schedule, tick as scheduler_tick
 from .skills import Skills
@@ -431,6 +441,25 @@ def schedules_payload(store: Store) -> list[dict]:
     return store.list("schedules")
 
 
+def ecosystem_payload(store: Store) -> dict:
+    """The ecosystem registry for the Ecosystem page: entries with
+    has_local computed for this machine, in registry order, plus
+    the registry's own provenance (file, seed state, load health).
+    A broken registry reports load_error here instead of failing
+    the request — the page shows the problem, honestly."""
+    eco = get_ecosystem(store)
+    projects = eco.list_entries()
+    return {
+        "projects": projects,
+        "count": len(projects),
+        "layers": list(LAYER_ORDER),
+        "registry_file": str(eco.path),
+        "seeded_from_bundle": eco.seeded,
+        "load_error": eco.load_error,
+        "skipped_entries": eco.skipped,
+    }
+
+
 def search_payload(store: Store, q: str) -> dict:
     """Global search across tasks, memories, skills, and the trail.
 
@@ -470,6 +499,11 @@ def export_payload(store: Store) -> dict:
         "memories_candidates": mem.list_candidates(),
         "skills": Skills(store).list_all(),
         "schedules": store.list("schedules"),
+        # The ecosystem registry rides along for visibility. It is
+        # machine-local config: import IGNORES this key (see
+        # import_snapshot), so a snapshot can never replace the
+        # registry of the machine importing it.
+        "ecosystem": get_ecosystem(store).raw_entries(),
         "trail": store.read_trail(limit=1_000_000),
         # Archived import history (v0.6.0) round-trips too, so an
         # export of a store that imported keeps its archive intact.
@@ -570,7 +604,10 @@ def import_snapshot(store: Store, snapshot) -> dict:
     - duplicate ids are re-minted, never overwritten, and internal
       references are remapped to the new ids;
     - validation happens fully before the first write, so a bad
-      snapshot changes NOTHING.
+      snapshot changes NOTHING;
+    - the snapshot's "ecosystem" key is IGNORED (v0.8.0): the
+      registry is machine-local config, not portable user data,
+      and importing must never replace this machine's registry.
     Returns the imported counts.
     """
     data = _validate_snapshot(snapshot)
@@ -950,6 +987,7 @@ body.compact .tile{flex-basis:34px;width:34px;height:34px}
  <button class="navbtn" data-page="skills">Skills</button>
  <button class="navbtn" data-page="analytics">Analytics</button>
  <button class="navbtn" data-page="logs">Logs</button>
+ <button class="navbtn" data-page="ecosystem">Ecosystem</button>
  <div class="navgroup">System</div>
  <button class="navbtn" data-page="system">System</button>
  <div class="sidefoot">v__VERSION__ - zero dependencies<br>stdlib only - $0 to run</div>
@@ -1116,6 +1154,15 @@ body.compact .tile{flex-basis:34px;width:34px;height:34px}
  <div class="log" id="logs"></div>
 </section>
 
+<section class="page" id="page-ecosystem">
+ <h2 class="ptitle">Ecosystem</h2>
+ <p class="pdesc">The studio's projects, from the registry file in the agent home. The registry is the allowlist for the list_projects, repo_status, and read_project_file tools: only registered projects can be inspected, and reads never leave a registered project's local tree. Local-tree presence is computed live on this machine.</p>
+ <input class="wide" id="eco-q" placeholder="search projects by name, role, or layer" oninput="renderEcosystem()">
+ <p class="small" id="eco-info"></p>
+ <div class="shelf shelf-red" id="eco-warn" style="display:none"></div>
+ <div id="ecosystem"></div>
+</section>
+
 <section class="page" id="page-chat">
  <h2 class="ptitle">Chat</h2>
  <p class="pdesc">Run tasks as a conversation. Sending creates and runs a task; write and exec steps still stop here for your approval.</p>
@@ -1185,6 +1232,7 @@ body.compact .tile{flex-basis:34px;width:34px;height:34px}
    <button class="dtile" data-page="skills" onclick="drawerGo('skills')">Skills</button>
    <button class="dtile" data-page="analytics" onclick="drawerGo('analytics')">Analytics</button>
    <button class="dtile" data-page="logs" onclick="drawerGo('logs')">Logs</button>
+   <button class="dtile" data-page="ecosystem" onclick="drawerGo('ecosystem')">Ecosystem</button>
   </div>
   <div class="dgroup">SYSTEM</div>
   <div class="dtiles">
@@ -1201,10 +1249,11 @@ body.compact .tile{flex-basis:34px;width:34px;height:34px}
 </div>
 <script>
 const AUTH_REQUIRED="__AUTH_REQUIRED__"==="1";
-const PAGES=["overview","board","approvals","tasks","chat","memory","skills","analytics","logs","schedules","system"];
-const PAGE_TITLES={overview:"Overview",board:"Board",approvals:"Approvals",tasks:"Tasks",chat:"Chat",memory:"Memory",skills:"Skills",analytics:"Analytics",logs:"Logs",schedules:"Schedules",system:"System"};
+const PAGES=["overview","board","approvals","tasks","chat","memory","skills","analytics","logs","ecosystem","schedules","system"];
+const PAGE_TITLES={overview:"Overview",board:"Board",approvals:"Approvals",tasks:"Tasks",chat:"Chat",memory:"Memory",skills:"Skills",analytics:"Analytics",logs:"Logs",ecosystem:"Ecosystem",schedules:"Schedules",system:"System"};
 let curPage="overview", selectedTask=null, logTypesLoaded=false;
 let logsPaused=false, lastBoard=null, lastMem=null, lastSkills=null, lastLogs=[], lastApprovals=[];
+let lastEco=null;
 let lastSchedules=[], chatTaskId=null, paletteFiltered=[], lastImportStatus="";
 let taskStatusFilter="all", skillStatusFilter="all";
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
@@ -1342,7 +1391,7 @@ function toggleExpand(btn){
 function taskStepCounts(t){ const steps=t.steps||[];
   return {done:steps.filter(s=>s.status==="done").length,total:steps.length}; }
 function glyphFor(tool){
-  return {write_file:"WRITE",read_file:"READ",list_dir:"LIST",echo_note:"NOTE",shell:"EXEC",search_files:"FIND",append_file:"APND"}[tool]
+  return {write_file:"WRITE",read_file:"READ",list_dir:"LIST",echo_note:"NOTE",shell:"EXEC",search_files:"FIND",append_file:"APND",list_projects:"PROJ",repo_status:"STAT",read_project_file:"FILE"}[tool]
     ||String(tool||"STEP").slice(0,5).toUpperCase();
 }
 function provStrip(cells){
@@ -1638,6 +1687,41 @@ function renderSchedules(){
     schedShelf(lastSchedules.filter(s=>!s.enabled),"","Paused schedules")
     :"<p class='small'>No schedules yet. Create one above - remember, it fires only while this dashboard server is running.</p>";
 }
+function renderEcosystem(){
+  const el=document.getElementById("ecosystem"); if(!el||!lastEco) return;
+  const q=(document.getElementById("eco-q").value||"").toLowerCase();
+  const match=x=>!q||((x.name||"")+" "+(x.role||"")+" "+(x.layer||"")).toLowerCase().includes(q);
+  const projects=lastEco.projects||[];
+  const order=(lastEco.layers&&lastEco.layers.length)?lastEco.layers:
+    ["kernel","law","language","rails","hosting","bodies","products","tools","other"];
+  const present=[]; projects.forEach(p=>{ if(!present.includes(p.layer)) present.push(p.layer); });
+  const ordered=order.filter(l=>present.includes(l))
+    .concat(present.filter(l=>!order.includes(l)).sort());
+  const info=document.getElementById("eco-info");
+  if(info) info.textContent="Registry: "+(lastEco.registry_file||"")+" - "+(lastEco.count||0)+" projects"+
+    (lastEco.seeded_from_bundle?" - seeded from the bundled registry on first run; the home file is yours to edit":"")+
+    (lastEco.skipped_entries?" - "+lastEco.skipped_entries+" invalid entr"+(lastEco.skipped_entries===1?"y":"ies")+" skipped":"");
+  const warn=document.getElementById("eco-warn");
+  if(warn){ if(lastEco.load_error){ warn.style.display="block";
+      warn.innerHTML="<div class='shelf-h'><span class='sl'>Registry problem</span></div><p class='small'>"+esc(lastEco.load_error)+" The registry loaded empty; the file was left untouched.</p>";
+    } else warn.style.display="none"; }
+  const ecoCard=(x,i)=>{
+    const local=x.has_local? "<span class='badge b-done'>local tree</span>"
+                           : "<span class='badge b-pending'>no local tree</span>";
+    const src=x.source? (x.source.length>90? x.source.slice(0,90)+"..." : x.source) : null;
+    return "<div class='card'><div class='cardhead'><span class='rank'>"+(i+1)+"</span><span class='tile'>"+
+      esc(String(x.name||"?").slice(0,4).toUpperCase())+"</span><span class='cardmain'><b>"+esc(x.name)+"</b> "+local+
+      (x.repo?" <span class='pill'>"+esc(x.repo)+"</span>":"")+"</span></div>"+
+      (x.role?"<div class='small' style='margin-top:6px'>"+esc(x.role)+"</div>":"")+
+      (x.local_path?"<div class='small'>"+esc(x.local_path)+"</div>":"")+
+      provStrip([["Source",src],["Layer",x.layer],["Status",x.has_local?"local tree present":"no local tree"]])+"</div>";
+  };
+  const ecoShelf=(layer,items)=> items.length?
+    "<div class='shelf'><div class='shelf-h'><span class='sl'>"+esc(layer)+"</span><span class='shelf-pill'>"+items.length+"</span></div>"+
+    items.map((x,i)=>ecoCard(x,i)).join("")+"</div>" : "";
+  el.innerHTML=ordered.map(l=>ecoShelf(l,projects.filter(p=>p.layer===l&&match(p)))).join("") ||
+    "<p class='small'>"+(projects.length?"No projects match the search.":"No projects in the registry.")+"</p>";
+}
 async function schAct(id,what){
   if(what==="delete" && !confirm("Delete this schedule? Tasks it already created stay.")) return;
   const url=what==="delete"? "/api/schedules/"+id : "/api/schedules/"+id+"/"+what;
@@ -1716,7 +1800,7 @@ function pickSearchTrail(){
   hideSearch(); document.getElementById("log-q").value=q; showPage("logs"); refresh();
 }
 document.addEventListener("click",e=>{ if(!e.target.closest(".searchwrap")) hideSearch(); });
-const PALETTE_PAGES=[["overview","Overview"],["board","Board"],["approvals","Approvals"],["tasks","Tasks"],["chat","Chat"],["memory","Memory"],["skills","Skills"],["analytics","Analytics"],["logs","Logs"],["schedules","Schedules"],["system","System"]];
+const PALETTE_PAGES=[["overview","Overview"],["board","Board"],["approvals","Approvals"],["tasks","Tasks"],["chat","Chat"],["memory","Memory"],["skills","Skills"],["analytics","Analytics"],["logs","Logs"],["ecosystem","Ecosystem"],["schedules","Schedules"],["system","System"]];
 function paletteItems(){
   const items=PALETTE_PAGES.map(([p,l])=>({label:"Go to "+l,run:()=>showPage(p)}));
   items.push({label:"New demo task",run:async()=>{
@@ -1752,12 +1836,12 @@ function posture(ok,text){
     "<span>"+esc(text)+"</span></div>";
 }
 async function refresh(){
-  let ov,b,m,s,an,sys,ap,sc;
+  let ov,b,m,s,an,sys,ap,sc,ec;
   try{
-    [ov,b,m,s,an,sys,ap,sc]=await Promise.all([j("/api/overview"),j("/api/board"),j("/api/memory"),j("/api/skills"),j("/api/analytics"),j("/api/system"),j("/api/approvals"),j("/api/schedules")]);
+    [ov,b,m,s,an,sys,ap,sc,ec]=await Promise.all([j("/api/overview"),j("/api/board"),j("/api/memory"),j("/api/skills"),j("/api/analytics"),j("/api/system"),j("/api/approvals"),j("/api/schedules"),j("/api/ecosystem")]);
   }catch(e){ return }
   lastBoard=b; lastMem=m; lastSkills=s; lastApprovals=ap.approvals||[];
-  lastSchedules=sc.schedules||[];
+  lastSchedules=sc.schedules||[]; lastEco=ec;
   // header + sidebar badges
   document.getElementById("hdr-model").textContent=sys.model_adapter+(sys.model_name?" / "+sys.model_name:"");
   document.getElementById("hdr-pending").textContent=ov.pending_approvals.length;
@@ -1798,9 +1882,9 @@ async function refresh(){
     progressBar(t.steps_done,t.steps_total)+
     provStrip([["Model",t.model||"-"],["Step",t.steps_done+" of "+t.steps_total],["Status",t.status]])+"</div>").join("")
     :"<p class='small'>No tasks yet. Create one above.</p>";
-  // board, tasks, approvals, memory, skills, schedules, chat picker
+  // board, tasks, approvals, memory, skills, schedules, ecosystem, chat picker
   renderBoard(); renderTaskList(); renderApprovals(); renderMemory(); renderSkills();
-  renderSchedules(); renderChatPicker();
+  renderSchedules(); renderEcosystem(); renderChatPicker();
   if(curPage==="chat"&&chatTaskId) loadChatThread();
   // analytics
   let ah="<div class='stats'>"+statCard(an.tasks_total,"Tasks total")+statCard(an.steps_executed+"/"+an.steps_total,"Steps executed")+
@@ -2013,6 +2097,8 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                 return self._send(200, system_payload(store, agent, token, host))
             if path == "/api/schedules":
                 return self._send(200, {"schedules": schedules_payload(store)})
+            if path == "/api/ecosystem":
+                return self._send(200, ecosystem_payload(store))
             if path == "/api/search":
                 qs = parse_qs(parsed.query)
                 return self._send(200, search_payload(

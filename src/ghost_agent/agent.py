@@ -29,6 +29,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import governance
+from .ecosystem import get_ecosystem
 from .models import ModelError, Router
 from .skills import Skills
 from .store import Store, new_id
@@ -45,7 +46,16 @@ class Agent:
                  workspace: str | Path | None = None):
         self.store = store
         self.router = router or Router()
-        self.tools = Tools(workspace or store.workspace)
+        # The ecosystem registry (v0.8.0) backs the read-class
+        # project tools and MockModel's 'status of <project>'
+        # pattern. One instance per store, shared with the
+        # dashboard via get_ecosystem.
+        self.ecosystem = get_ecosystem(store)
+        self.tools = Tools(workspace or store.workspace,
+                           ecosystem=self.ecosystem)
+        mock = getattr(self.router, "mock", None)
+        if mock is not None:
+            mock.ecosystem = self.ecosystem
         self.skills = Skills(store)
 
     # ---- steps + usage bookkeeping --------------------------------------

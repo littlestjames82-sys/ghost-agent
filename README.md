@@ -38,8 +38,8 @@ needed), or `pip install .` for the `ghost-agent` command.
 # including one approval step (the demo approves it, as a human would).
 PYTHONPATH=src python3 -m ghost_agent demo
 
-# Dashboard v4 (sidebar UI: overview, board, approvals, tasks, chat,
-# memory, skills, analytics, logs, schedules, system):
+# Dashboard (sidebar UI: overview, board, approvals, tasks, chat,
+# memory, skills, analytics, logs, ecosystem, schedules, system):
 PYTHONPATH=src python3 -m ghost_agent serve [--host 127.0.0.1] [--port 8770]
 
 # Non-loopback bind (refused unless the token is set):
@@ -59,24 +59,30 @@ PYTHONPATH=src python3 -m ghost_agent schedule-remove <schedule_id>
 
 State lives under `GHOST_AGENT_HOME` (default `~/.ghost-agent/`):
 tasks, memories, skills, and approvals as JSON, the trail as
-append-only `trail.jsonl`, and a sandboxed `workspace/` directory that
-is the only place tools may touch.
+append-only `trail.jsonl`, a sandboxed `workspace/` directory that
+is the only place write tools may touch, and `ecosystem.json` —
+the project registry (seeded on first run; yours to edit).
 
 ## How it works
 
 * **Store** — JSON/JSONL store. Stable ids, timestamps, and memory
   provenance (source, verified flag, superseded_by).
 * **Governance** — every tool call is classified: `read_file`,
-  `list_dir`, `echo_note`, `search_files` auto-allow; `write_file`,
-  `append_file`, and `shell` require human approval; unknown tools
-  are denied by default. Deny marks the step failed and stops the
-  run honestly.
+  `list_dir`, `echo_note`, `search_files`, and the v0.8.0 ecosystem
+  tools (`list_projects`, `repo_status`, `read_project_file`)
+  auto-allow; `write_file`, `append_file`, and `shell` require
+  human approval; unknown tools are denied by default. Deny marks
+  the step failed and stops the run honestly.
 * **Tools** — sandboxed to the workspace root: `read_file`, `list_dir`,
   `echo_note`, `search_files` (read — literal substring search with
   file paths + line numbers, capped at 50 matches, binary and >1 MB
   files skipped), `write_file`, `append_file` (write — raw append,
   approval-gated exactly like a write), `shell` (exec, timed out
   and exit-code captured). Paths escaping the sandbox are refused.
+  The ecosystem tools are sandboxed differently: the registry is
+  their allowlist, and `read_project_file` never leaves a
+  registered project's local root (see "Ecosystem registry
+  (v0.8.0)" below).
 * **Agent loop** — since v0.7.0 the loop is **plan-act-observe**:
   the model is asked for one step at a time, with the completed
   steps and their actual outputs in context, so a step can be
@@ -269,14 +275,65 @@ is the only place tools may touch.
   output per million tokens, so Muse Spark runs report an
   estimated cost instead of "unknown".
 
+## Ecosystem registry (v0.8.0)
+
+Ghost Agent knows the studio's own projects through a **registry**:
+a JSON list of `{name, repo, local_path, layer, role, source}`
+entries, where `layer` is the stack layer (kernel, law, language,
+rails, hosting, bodies, products, tools, other).
+
+* **The file.** `GHOST_AGENT_HOME/ecosystem.json` is the source of
+  truth. On first run it is seeded from the bundled registry
+  (72 projects) and written to the home — from then on it is yours
+  to edit: add a project, fix a path, change a layer. Loading is
+  defensive: a registry that cannot be parsed, or entries missing
+  `name`/`layer`, never crash startup; the problem is reported on
+  the Ecosystem page and in the trail, invalid entries are
+  skipped, and a broken file is never overwritten by the agent.
+* **The tools** (all read class — they auto-allow like every read):
+  `list_projects{layer?}` lists the registry with each project's
+  local-tree presence computed live; `repo_status{project}` reports
+  a registered project's branch, uncommitted-change count, and
+  last commit from its local git tree (or, honestly, that there is
+  no local tree on this machine, or that the tree is not a git
+  repository); `read_project_file{project, path}` reads a text file
+  inside a registered project's root — the resolved path must stay
+  under the root, output is capped at 200KB with a truncation
+  marker, and binary files get a clear error. Unknown project
+  names are refused with a pointer to the registry.
+* **The page.** The Ecosystem page (the 12th, under Intelligence)
+  renders the registry as shelves by stack layer — kernel first —
+  with a card per project: role, repo, local path, a local-tree
+  badge, and a Source → Layer → Status provenance strip. It is
+  backed by `GET /api/ecosystem`.
+* **Scope, honestly.** This pass is **read-only and local**:
+  status comes from local git trees only — there are **no network
+  calls and no GitHub API** (a project with no local tree here
+  reports exactly that, plus its repo slug). Writes stay confined
+  to the agent's own workspace, exactly as before; the ecosystem
+  tools can look at the studio's projects but never touch them.
+* **Export/import.** `GET /api/export` carries the registry under
+  an `ecosystem` key for visibility. `POST /api/import` **ignores**
+  that key: the registry is machine-local config (its paths name
+  this machine's trees), not portable user data, so importing a
+  snapshot never replaces the local registry.
+
+MockModel also learned two deterministic patterns: a goal
+mentioning "list projects" or "ecosystem" plans a `list_projects`
+step, and "status of <project>" plans a `repo_status` step — only
+for a name the registry actually holds (anything else falls
+through to the older patterns).
+
 ## Models
 
 * **MockModel (default in tests/demo)** — a deterministic, rule-based
   planner that pattern-matches a small set of phrasings
   ("write X with: …", "read X", "run command: …", "demo", and since
-  v0.6.0 "find/search …", "append … to …", "summarize …"). It is
-  **not intelligent**; it exists so the loop, governance, and trail
-  can be exercised and tested without any provider.
+  v0.6.0 "find/search …", "append … to …", "summarize …"; since
+  v0.8.0 also "list projects"/"ecosystem" and "status of
+  <project>"). It is **not intelligent**; it exists so the loop,
+  governance, and trail can be exercised and tested without any
+  provider.
 * **Real model (optional)** — an OpenAI-compatible adapter (urllib)
   used when you supply your own key at runtime. Its planner prompt
   carries the v0.6.0 guidance described above (compose with
@@ -311,6 +368,13 @@ is the only place tools may touch.
   ticks every 20 seconds). Stop the server and schedules wait —
   there is no system daemon, cron entry, or cloud trigger behind
   them.
+* Ecosystem status is local-only: `repo_status` reads local git
+  trees and nothing else. There is no GitHub API in v0.8.0 (the
+  runtime has no credential story for it), remote-only state
+  (CI, issues, PRs) is invisible to it, and registry `local_path`
+  values name this machine's trees — a registry copied to another
+  machine truthfully reports "no local tree" until its paths are
+  edited there.
 * No fine-tuned or foundation model in v1 (out of scope by design).
 
 ## Tests
@@ -323,6 +387,8 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v4.py -v   # v4 known-an
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v5.py -v   # v5 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v6.py -v   # v6 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7.py -v   # v7 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7b.py -v  # v7b live-fix gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v8.py -v   # v8 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
@@ -331,8 +397,9 @@ See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3),
 [BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4),
 [BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5),
-[BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6), and
-[BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7) for gate results and
+[BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6),
+[BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7), and
+[BUILD_REPORT_V8.md](BUILD_REPORT_V8.md) (v8) for gate results and
 counts.
 
 ## Design language (v0.5.0)
