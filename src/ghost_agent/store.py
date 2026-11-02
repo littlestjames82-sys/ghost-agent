@@ -77,6 +77,14 @@ class Store:
         items.sort(key=lambda e: e.get("created_at", ""))
         return items
 
+    def delete(self, collection: str, entity_id: str) -> bool:
+        data = self._load(collection)
+        if entity_id not in data:
+            return False
+        del data[entity_id]
+        self._save(collection, data)
+        return True
+
     def update(self, collection: str, entity_id: str, **fields) -> dict | None:
         data = self._load(collection)
         entity = data.get(entity_id)

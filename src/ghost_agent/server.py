@@ -1,4 +1,4 @@
-"""Dashboard server v3: stdlib http.server, binds 127.0.0.1 by default.
+"""Dashboard server v4: stdlib http.server, binds 127.0.0.1 by default.
 
 Sidebar SPA in the Ghost violet dark theme — a single stdlib-served
 page, no build step. v3 improves every page: descriptions and empty
@@ -9,6 +9,17 @@ memory propose form (POST /api/memory/propose, candidate-only),
 skill filters + step timelines, analytics donut + approval ratio +
 14-day activity, logs pause/severity/download, and a system health +
 auth-posture section (health block in GET /api/system).
+
+v4 adds: a Schedules page (recurring tasks via ghost_agent.scheduler;
+a daemon thread ticks every 20s while serving — schedules only fire
+while this server runs, and a scheduled write/exec still waits for
+human approval), a Chat page (conversation-style task runs with
+inline approve/deny), global header search (GET /api/search), a
+Ctrl/Cmd+K command palette, bulk approvals (POST
+/api/approvals/decide_all, same per-item decide path), task retry
+(POST /api/tasks/{id}/retry, failed tasks only), a state export
+(GET /api/export, attachment download), and a Comfortable/Compact
+density toggle persisted in localStorage.
 
 Auth (Hermes-style, fail-closed):
 - Loopback bind: no token needed (the v1 posture; warning banner).
@@ -24,6 +35,7 @@ import json
 import os
 import platform
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +44,7 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from .agent import Agent
 from .memory import Memory
+from .scheduler import create_schedule, tick as scheduler_tick
 from .skills import Skills
 from .store import Store, new_id, now_iso
 
@@ -285,6 +298,77 @@ def trail_search(store: Store, q: str = "", type_filter: str = "",
     return out
 
 
+def schedules_payload(store: Store) -> list[dict]:
+    return store.list("schedules")
+
+
+def search_payload(store: Store, q: str) -> dict:
+    """Global search across tasks, memories, skills, and the trail.
+
+    Case-insensitive substring matching; each group capped at 8,
+    trail newest first. Empty/absent q -> all groups empty."""
+    empty = {"tasks": [], "memories": [], "skills": [], "trail": []}
+    q = (q or "").strip()
+    if not q:
+        return empty
+    ql = q.lower()
+    tasks = [{"id": t["id"], "title": t.get("title"), "status": t.get("status")}
+             for t in reversed(store.list("tasks"))
+             if ql in ((t.get("title") or "") + " "
+                       + (t.get("goal") or "")).lower()][:8]
+    memories = [{"id": m["id"], "text": m.get("text"), "status": m.get("status")}
+                for m in reversed(store.list("memories"))
+                if ql in (m.get("text") or "").lower()][:8]
+    skills = [{"id": s["id"], "name": s.get("name"),
+               "trusted": bool(s.get("trusted"))}
+              for s in reversed(store.list("skills"))
+              if ql in (s.get("name") or "").lower()][:8]
+    return {"tasks": tasks, "memories": memories, "skills": skills,
+            "trail": trail_search(store, q=q, limit=8)}
+
+
+def export_payload(store: Store) -> dict:
+    """Full state snapshot for download. Holds store data only — the
+    dashboard token and any model API key are never in the store, so
+    they can never appear here."""
+    mem = Memory(store)
+    return {
+        "version": __version__,
+        "exported_at": now_iso(),
+        "tasks": store.list("tasks"),
+        "approvals": store.list("approvals"),
+        "memories_trusted": mem.list_trusted(),
+        "memories_candidates": mem.list_candidates(),
+        "skills": Skills(store).list_all(),
+        "schedules": store.list("schedules"),
+        "trail": store.read_trail(limit=1_000_000),
+    }
+
+
+def decide_all(store: Store, agent: Agent, decision: str) -> dict:
+    """Decide every approval pending at call time, each through the
+    SAME per-item path as a single approve/deny (agent.approve_task /
+    deny_task), so each is individually trailed. Approvals created
+    by those runs (a later step pausing) are NOT decided here."""
+    results = []
+    for appr in list(agent.pending_approvals()):
+        task_id = appr.get("task_id")
+        if decision == "approved":
+            agent.approve_task(task_id)
+        else:
+            agent.deny_task(task_id)
+        after = store.get("approvals", appr["id"]) or {}
+        status = after.get("status")
+        results.append({"approval_id": appr["id"], "task_id": task_id,
+                        "ok": status == decision, "status": status})
+    return {
+        "results": results,
+        "decided": sum(1 for r in results if r["ok"]),
+        "approved": sum(1 for r in results if r["status"] == "approved"),
+        "denied": sum(1 for r in results if r["status"] == "denied"),
+    }
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -403,6 +487,33 @@ display:flex;align-items:center;justify-content:center;font-weight:700;font-styl
 .tl{font-size:13px;color:var(--muted);word-break:break-word}
 .posture{display:flex;gap:9px;align-items:flex-start;margin:7px 0;font-size:14px}
 mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
+.searchwrap{position:relative;flex:1;min-width:170px;max-width:430px}
+.searchwrap input{width:100%}
+.searchresults{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--panel);
+border:1px solid var(--line);border-radius:10px;padding:6px;z-index:30;display:none;
+max-height:62vh;overflow:auto;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.sr-group{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+padding:7px 8px 2px}
+.sr-item{padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13.5px;word-break:break-word}
+.sr-item:hover{background:var(--card)}
+.palette{position:fixed;inset:0;background:rgba(5,3,12,.72);z-index:60;display:none;
+align-items:flex-start;justify-content:center;padding-top:9vh}
+.palettebox{width:min(560px,92vw);background:var(--panel);border:1px solid var(--violet);
+border-radius:12px;padding:10px;box-shadow:0 18px 48px rgba(0,0,0,.6)}
+.palettebox input{width:100%}
+.bubble{max-width:88%;padding:10px 13px;border-radius:12px;margin:9px 0;font-size:14px;
+word-break:break-word}
+.bubble.user{background:var(--violet);color:#fff;margin-left:auto;border-bottom-right-radius:4px}
+.bubble.agent{background:var(--panel);border:1px solid var(--line);border-bottom-left-radius:4px}
+.bubble.errb{border-color:var(--red);color:#ffb3b3}
+.composer{display:flex;gap:8px;position:sticky;bottom:0;background:var(--bg);padding:10px 0 2px}
+.composer input{flex:1}
+body.compact content{padding:10px 12px}
+body.compact .card{padding:7px 9px;margin:5px 0;font-size:13px}
+body.compact .stat{padding:8px}
+body.compact .stat .num{font-size:19px}
+body.compact .navbtn{padding:7px 10px}
+body.compact .seclabel{margin:13px 0 6px}
 @media (max-width:820px){
  .layout{flex-direction:column}
  .sidebar{width:100%;flex:none;height:auto;position:static;flex-direction:row;flex-wrap:wrap;
@@ -420,10 +531,12 @@ mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
  <button class="navbtn" data-page="board">Board</button>
  <button class="navbtn" data-page="approvals">Approvals <span class="navcount" id="nav-approvals" style="display:none">0</span></button>
  <button class="navbtn" data-page="tasks">Tasks <span class="navcount alt" id="nav-tasks" style="display:none">0</span></button>
+ <button class="navbtn" data-page="chat">Chat</button>
  <button class="navbtn" data-page="memory">Memory <span class="navcount alt" id="nav-memory" style="display:none">0</span></button>
  <button class="navbtn" data-page="skills">Skills</button>
  <button class="navbtn" data-page="analytics">Analytics</button>
  <button class="navbtn" data-page="logs">Logs</button>
+ <button class="navbtn" data-page="schedules">Schedules <span class="navcount alt" id="nav-schedules" style="display:none">0</span></button>
  <button class="navbtn" data-page="system">System</button>
  <div class="sidefoot">v__VERSION__ - zero dependencies<br>stdlib only - $0 to run</div>
 </nav>
@@ -434,6 +547,10 @@ mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
  <span class="pill">model <b id="hdr-model">-</b></span>
  <span class="pill">pending approvals <b id="hdr-pending">0</b></span>
  <span class="pill" id="hdr-auth">auth -</span>
+ <span class="searchwrap"><input id="globalsearch" placeholder="Search tasks, memory, skills, trail..." oninput="globalSearch()" autocomplete="off">
+ <div class="searchresults" id="search-results"></div></span>
+ <button class="ghostbtn small" id="density-btn" onclick="toggleDensity()">Density: Comfortable</button>
+ <button class="ghostbtn small" onclick="openPalette()">Palette (Ctrl+K)</button>
 </div>
 <div class="warn" id="warnbar">WARNING: __WARNING__</div>
 <content>
@@ -476,6 +593,9 @@ mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
  <h2 class="ptitle">Approvals</h2>
  <p class="pdesc">Write and exec steps wait here. Approving runs the step; denying fails the task honestly. Nothing executes before its trail record is written.</p>
  <div class="seclabel">Pending</div>
+ <p><button id="ap-approve-all" onclick="decideAll('approved')">Approve all</button>
+ <button class="deny" id="ap-deny-all" onclick="decideAll('denied')">Deny all</button>
+ <span class="small">Bulk actions decide only what is pending right now, each through the normal per-item path.</span></p>
  <div class="statusline" id="ap-status"></div>
  <div id="approvals"></div>
  <div class="seclabel">Recent decisions</div>
@@ -498,6 +618,7 @@ mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
   <div>
    <h3 id="td-title" style="margin-top:2px">No task selected</h3>
    <p class="small" id="td-meta">Tap a task to see its steps and trail.</p>
+   <div id="td-actions"></div>
    <div id="td-steps"></div>
    <div class="seclabel">Trail timeline (this task)</div>
    <div id="td-timeline"><p class="small">No task selected yet.</p></div>
@@ -567,6 +688,41 @@ mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
  <div class="log" id="logs"></div>
 </section>
 
+<section class="page" id="page-chat">
+ <h2 class="ptitle">Chat</h2>
+ <p class="pdesc">Run tasks as a conversation. Sending creates and runs a task; write and exec steps still stop here for your approval.</p>
+ <div class="fchips"><span class="small">Reopen a recent task:</span>
+  <select id="chat-picker"></select>
+  <button type="button" class="ghostbtn small" onclick="openChatPicked()">Open</button>
+ </div>
+ <div id="chat-thread"><p class="small">No thread yet. Send a goal below - try "demo", "read notes.txt", or "write notes.txt with: hello".</p></div>
+ <div class="statusline" id="chat-status"></div>
+ <form id="chat-form" class="composer">
+  <input id="chat-input" placeholder="Message Ghost Agent..." autocomplete="off" required>
+  <button type="submit">Send</button>
+ </form>
+</section>
+
+<section class="page" id="page-schedules">
+ <h2 class="ptitle">Schedules</h2>
+ <p class="pdesc">Recurring tasks. Schedules fire only while this dashboard server is running (it checks every 20 seconds), and a scheduled write or exec still waits for human approval.</p>
+ <div class="seclabel">New schedule</div>
+ <form id="sch-form">
+  <input class="wide" id="sch-goal" placeholder="goal, e.g. write notes.txt with: standup notes" required>
+  <p><input id="sch-title" placeholder="title (optional)" style="width:200px">
+  <select id="sch-kind" onchange="schKind()">
+   <option value="interval">interval</option>
+   <option value="daily">daily</option>
+  </select>
+  <span id="sch-interval-wrap">every <input id="sch-interval" type="number" min="1" value="60" style="width:80px"> minutes</span>
+  <span id="sch-time-wrap" style="display:none">at <input id="sch-time" type="time" value="09:00"></span>
+  <button type="submit">Create schedule</button></p>
+ </form>
+ <div class="statusline" id="sch-status"></div>
+ <div class="seclabel">Schedules</div>
+ <div id="schedules"></div>
+</section>
+
 <section class="page" id="page-system">
  <h2 class="ptitle">System</h2>
  <p class="pdesc">Version, storage, model, auth posture, and health of this dashboard server.</p>
@@ -574,11 +730,19 @@ mark{background:var(--amber);color:#1a1200;border-radius:2px;padding:0 1px}
 </section>
 </content>
 </div></div>
+<div class="palette" id="palette">
+ <div class="palettebox">
+  <input id="palette-q" placeholder="Go to a page or run an action..." oninput="renderPalette()" onkeydown="if(event.key==='Enter'){event.preventDefault();paletteGo(0)}" autocomplete="off">
+  <div id="palette-list" style="margin-top:6px"></div>
+  <p class="small">Enter runs the first match - Esc closes.</p>
+ </div>
+</div>
 <script>
 const AUTH_REQUIRED="__AUTH_REQUIRED__"==="1";
-const PAGES=["overview","board","approvals","tasks","memory","skills","analytics","logs","system"];
+const PAGES=["overview","board","approvals","tasks","chat","memory","skills","analytics","logs","schedules","system"];
 let curPage="overview", selectedTask=null, logTypesLoaded=false;
 let logsPaused=false, lastBoard=null, lastMem=null, lastSkills=null, lastLogs=[], lastApprovals=[];
+let lastSchedules=[], chatTaskId=null, paletteFiltered=[];
 let taskStatusFilter="all", skillStatusFilter="all";
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function cookieTok(){const m=document.cookie.match(/(?:^|; )ghost_token=([^;]*)/);return m?decodeURIComponent(m[1]):""}
@@ -693,6 +857,8 @@ async function detail(id){
   document.getElementById("td-meta").innerHTML="status "+badge(d.task.status)+" - model "+esc(d.task.model)+
     (d.task.fallback_reason?" - router fallback: "+esc(d.task.fallback_reason):"")+
     (d.task.error?" - "+esc(d.task.error):"");
+  document.getElementById("td-actions").innerHTML=d.task.status==="failed"
+    ?"<p><button onclick='retryTask(\\""+d.task.id+"\\")'>Retry this task</button> <span class='small'>Creates a new task with the same goal; the original stays as-is.</span></p>":"";
   document.getElementById("td-steps").innerHTML=(d.task.steps||[]).length?(d.task.steps||[]).map((s,i)=>
     "<div class='card'>"+i+". "+esc(s.tool)+" "+badge(s.status)+
     (s.error?"<pre class='stepout'>error: "+esc(s.error)+"</pre>":"")+
@@ -757,7 +923,8 @@ function renderBoard(){
       (list.length? list.map(t=>{ const sc=taskStepCounts(t);
         return "<div class='card'><a href='#' onclick='gotoTask(\\""+t.id+"\\");return false'>"+esc(t.title)+"</a><br>"+badge(t.status)+
           "<div class='small'>model "+esc(t.model||"-")+" - created "+esc(fmtTime(t.created_at))+"</div>"+
-          progressBar(sc.done,sc.total)+"<div class='small'>steps "+sc.done+"/"+sc.total+"</div></div>"; }).join("")
+          progressBar(sc.done,sc.total)+"<div class='small'>steps "+sc.done+"/"+sc.total+"</div>"+
+          (t.status==="failed"?"<p style='margin:6px 0 2px'><button class='ghostbtn small' onclick='retryTask(\\""+t.id+"\\")'>Retry</button></p>":"")+"</div>"; }).join("")
       : "<p class='small'>"+(q?"No cards match the filter.":"No tasks here.")+"</p>")+"</div>";
   }).join("");
 }
@@ -877,16 +1044,165 @@ function copyCmd(id){
   const t=document.getElementById(id).textContent;
   if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(t);
 }
+async function retryTask(id){
+  let r; try{ r=await j("/api/tasks/"+id+"/retry",{method:"POST"}) }catch(e){ return }
+  if(r&&r.task){ selectedTask=r.task.id; showPage("tasks"); refresh(); }
+}
+async function decideAll(decision){
+  const n=lastApprovals.filter(a=>a.status==="pending").length;
+  if(!n){ flash("ap-status","Nothing pending to decide"); return }
+  if(!confirm((decision==="approved"?"Approve":"Deny")+" all "+n+" pending approval(s)?"+
+    (decision==="denied"?" Each task will be stopped.":""))) return;
+  let r; try{ r=await j("/api/approvals/decide_all",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({decision:decision})}) }catch(e){
+    flash("ap-status","Bulk decide failed - is the server reachable?",true); return }
+  if(r&&r.error){ flash("ap-status","Bulk decide failed: "+r.error,true); return }
+  flash("ap-status","Approved "+(r.approved||0)+", denied "+(r.denied||0)+" (of "+n+" pending)");
+  refresh();
+}
+function schKind(){
+  const k=document.getElementById("sch-kind").value;
+  document.getElementById("sch-interval-wrap").style.display=k==="interval"?"inline":"none";
+  document.getElementById("sch-time-wrap").style.display=k==="daily"?"inline":"none";
+}
+function renderSchedules(){
+  const el=document.getElementById("schedules"); if(!el) return;
+  const navS=document.getElementById("nav-schedules");
+  const enabledCount=lastSchedules.filter(s=>s.enabled).length;
+  navS.style.display=enabledCount?"inline-block":"none"; navS.textContent=enabledCount;
+  el.innerHTML=lastSchedules.length? lastSchedules.map(s=>{
+    const kind=s.kind==="daily"? "daily at "+esc(s.time_hhmm||"") : "every "+esc(s.interval_minutes)+" min";
+    return "<div class='card'><b>"+esc(s.title||s.goal)+"</b> "+
+      "<span class='badge b-"+(s.enabled?"done":"pending")+"'>"+(s.enabled?"enabled":"disabled")+"</span> "+
+      "<span class='pill'>"+kind+"</span>"+
+      "<div class='small' style='margin-top:6px'>goal: "+esc(s.goal)+"</div>"+
+      "<div class='small'>next run: "+esc(fmtTime(s.next_run_at))+" - last run: "+esc(fmtTime(s.last_run_at))+
+      (s.last_task_id?" - <a href='#' onclick='gotoTask(\\""+s.last_task_id+"\\");return false'>last task</a>":"")+"</div>"+
+      "<p><button class='ghostbtn small' onclick='schAct(\\""+s.id+"\\",\\"toggle\\")'>"+(s.enabled?"Disable":"Enable")+"</button> "+
+      "<button class='ghostbtn small' onclick='schAct(\\""+s.id+"\\",\\"run\\")'>Run now</button> "+
+      "<button class='deny small' onclick='schAct(\\""+s.id+"\\",\\"delete\\")'>Delete</button></p></div>"; }).join("")
+    :"<p class='small'>No schedules yet. Create one above - remember, it fires only while this dashboard server is running.</p>";
+}
+async function schAct(id,what){
+  if(what==="delete" && !confirm("Delete this schedule? Tasks it already created stay.")) return;
+  const url=what==="delete"? "/api/schedules/"+id : "/api/schedules/"+id+"/"+what;
+  let r; try{ r=await j(url,{method:what==="delete"?"DELETE":"POST"}) }catch(e){
+    flash("sch-status","Schedule action failed - is the server reachable?",true); return }
+  if(r&&r.error){ flash("sch-status","Failed: "+r.error,true); return }
+  flash("sch-status", what==="run" ? "Schedule fired - task created (see Board/Tasks)"
+    : what==="toggle" ? "Schedule toggled" : "Schedule deleted");
+  refresh();
+}
+function chatArgs(s){ const a=JSON.stringify(s.args||{}); return a.length>170?a.slice(0,170)+"...":a }
+function renderChat(task){
+  let h="<div class='bubble user'>"+esc(task.goal)+"</div>";
+  h+=(task.steps||[]).map(s=>
+    "<div class='card'><b>"+esc(s.tool||"step")+"</b> "+badge(s.status)+
+    "<div class='small'>"+esc(chatArgs(s))+"</div>"+
+    (s.error?"<pre class='stepout'>error: "+esc(s.error)+"</pre>":"")+
+    (s.result&&s.result.output?"<pre class='stepout'>"+esc(s.result.output)+"</pre>":"")+"</div>").join("");
+  if(task.status==="waiting_approval"){
+    h+="<div class='card'><b>Waiting on your approval.</b>"+
+      "<p><button onclick='chatAct(\\"approve\\")'>Approve</button> "+
+      "<button class='deny' onclick='chatAct(\\"deny\\")'>Deny</button></p></div>";
+  } else if(task.status==="done"){ h+="<div class='bubble agent'>Done - all steps completed.</div>"; }
+  else if(task.status==="failed"){ h+="<div class='bubble agent errb'>Run failed"+(task.error?": "+esc(task.error):"")+"</div>"; }
+  document.getElementById("chat-thread").innerHTML=h;
+}
+async function loadChatThread(){
+  if(!chatTaskId) return;
+  let d; try{ d=await j("/api/tasks/"+chatTaskId) }catch(e){ return }
+  renderChat(d.task);
+}
+async function chatAct(what){
+  if(what==="deny" && !confirm("Deny this step? The task will be stopped.")) return;
+  try{ await j("/api/tasks/"+chatTaskId+"/"+what,{method:"POST"}) }catch(e){
+    flash("chat-status","Action failed - is the server reachable?",true); return }
+  flash("chat-status",what==="approve"?"Approved - step executed":"Denied - task stopped");
+  loadChatThread(); refresh();
+}
+function renderChatPicker(){
+  const sel=document.getElementById("chat-picker"); if(!sel||!lastBoard) return;
+  const all=cols.flatMap(([k])=>lastBoard.columns[k]||[]);
+  const cur=sel.value;
+  sel.innerHTML=all.length? all.map(t=>"<option value='"+esc(t.id)+"'>"+esc(t.title)+" ("+esc(t.status)+")</option>").join("")
+    : "<option value=''>no tasks yet</option>";
+  if(chatTaskId) sel.value=chatTaskId; else if(cur) sel.value=cur;
+}
+function openChatPicked(){
+  const v=document.getElementById("chat-picker").value;
+  if(!v){ flash("chat-status","No task to open",true); return }
+  chatTaskId=v; loadChatThread();
+}
+let searchTimer=null;
+function hideSearch(){ const b=document.getElementById("search-results"); if(b) b.style.display="none"; }
+function globalSearch(){
+  const inp=document.getElementById("globalsearch"), box=document.getElementById("search-results");
+  const q=inp.value.trim();
+  if(!q){ box.style.display="none"; box.innerHTML=""; return }
+  clearTimeout(searchTimer);
+  searchTimer=setTimeout(async()=>{
+    let d; try{ d=await j("/api/search?q="+encodeURIComponent(q)) }catch(e){ return }
+    let h="";
+    const grp=(label,items,fn)=>{ if(!items||!items.length) return "";
+      return "<div class='sr-group'>"+label+"</div>"+items.map(fn).join(""); };
+    h+=grp("Tasks",d.tasks,t=>"<div class='sr-item' onclick='pickSearchTask(\\""+t.id+"\\")'>"+esc(t.title)+" "+badge(t.status)+"</div>");
+    h+=grp("Memories",d.memories,m=>"<div class='sr-item' onclick='pickSearchPage(\\"memory\\")'>"+esc(m.text)+"</div>");
+    h+=grp("Skills",d.skills,s=>"<div class='sr-item' onclick='pickSearchPage(\\"skills\\")'>"+esc(s.name)+"</div>");
+    h+=grp("Trail",d.trail,e=>"<div class='sr-item' onclick='pickSearchTrail()'>"+esc(e.type)+" - "+esc(String(e.ts||"").slice(0,19))+"</div>");
+    box.innerHTML=h||"<p class='small' style='padding:6px 8px'>No results.</p>";
+    box.style.display="block";
+  },180);
+}
+function pickSearchTask(id){ hideSearch(); showPage("tasks"); detail(id); }
+function pickSearchPage(p){ hideSearch(); showPage(p); }
+function pickSearchTrail(){
+  const q=document.getElementById("globalsearch").value.trim();
+  hideSearch(); document.getElementById("log-q").value=q; showPage("logs"); refresh();
+}
+document.addEventListener("click",e=>{ if(!e.target.closest(".searchwrap")) hideSearch(); });
+const PALETTE_PAGES=[["overview","Overview"],["board","Board"],["approvals","Approvals"],["tasks","Tasks"],["chat","Chat"],["memory","Memory"],["skills","Skills"],["analytics","Analytics"],["logs","Logs"],["schedules","Schedules"],["system","System"]];
+function paletteItems(){
+  const items=PALETTE_PAGES.map(([p,l])=>({label:"Go to "+l,run:()=>showPage(p)}));
+  items.push({label:"New demo task",run:async()=>{
+    try{ await j("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:"demo"})}) }catch(e){}
+    showPage("board"); refresh(); }});
+  items.push({label:"Export state (download JSON)",run:()=>{ window.location="/api/export"; }});
+  return items;
+}
+function renderPalette(){
+  const q=(document.getElementById("palette-q").value||"").toLowerCase();
+  paletteFiltered=paletteItems().filter(it=>it.label.toLowerCase().includes(q));
+  document.getElementById("palette-list").innerHTML=paletteFiltered.length
+    ? paletteFiltered.map((it,i)=>"<div class='sr-item' onclick='paletteGo("+i+")'>"+esc(it.label)+"</div>").join("")
+    : "<p class='small'>No matches.</p>";
+}
+function paletteGo(i){ const it=paletteFiltered[i]; closePalette(); if(it) it.run(); }
+function openPalette(){
+  document.getElementById("palette").style.display="flex";
+  const inp=document.getElementById("palette-q"); inp.value=""; renderPalette(); inp.focus();
+}
+function closePalette(){ document.getElementById("palette").style.display="none"; }
+document.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey)&&(e.key==="k"||e.key==="K")){ e.preventDefault(); openPalette(); }
+  if(e.key==="Escape") closePalette();
+});
+function toggleDensity(){
+  const c=document.body.classList.toggle("compact");
+  document.getElementById("density-btn").textContent=c?"Density: Compact":"Density: Comfortable";
+  try{ localStorage.setItem("ga-density",c?"compact":"comfortable") }catch(e){}
+}
 function posture(ok,text){
   return "<div class='posture'>"+(ok?"<span class='badge b-done'>PASS</span>":"<span class='badge b-candidate'>WARN</span>")+
     "<span>"+esc(text)+"</span></div>";
 }
 async function refresh(){
-  let ov,b,m,s,an,sys,ap;
+  let ov,b,m,s,an,sys,ap,sc;
   try{
-    [ov,b,m,s,an,sys,ap]=await Promise.all([j("/api/overview"),j("/api/board"),j("/api/memory"),j("/api/skills"),j("/api/analytics"),j("/api/system"),j("/api/approvals")]);
+    [ov,b,m,s,an,sys,ap,sc]=await Promise.all([j("/api/overview"),j("/api/board"),j("/api/memory"),j("/api/skills"),j("/api/analytics"),j("/api/system"),j("/api/approvals"),j("/api/schedules")]);
   }catch(e){ return }
   lastBoard=b; lastMem=m; lastSkills=s; lastApprovals=ap.approvals||[];
+  lastSchedules=sc.schedules||[];
   // header + sidebar badges
   document.getElementById("hdr-model").textContent=sys.model_adapter+(sys.model_name?" / "+sys.model_name:"");
   document.getElementById("hdr-pending").textContent=ov.pending_approvals.length;
@@ -918,8 +1234,10 @@ async function refresh(){
     "<div class='card'><a href='#' onclick='gotoTask(\\""+t.id+"\\");return false'>"+esc(t.title)+"</a> "+badge(t.status)+
     "<div class='small'>model "+esc(t.model||"-")+" - steps "+t.steps_done+"/"+t.steps_total+"</div>"+progressBar(t.steps_done,t.steps_total)+"</div>").join("")
     :"<p class='small'>No tasks yet. Create one above.</p>";
-  // board, tasks, approvals, memory, skills
+  // board, tasks, approvals, memory, skills, schedules, chat picker
   renderBoard(); renderTaskList(); renderApprovals(); renderMemory(); renderSkills();
+  renderSchedules(); renderChatPicker();
+  if(curPage==="chat"&&chatTaskId) loadChatThread();
   // analytics
   let ah="<div class='stats'>"+statCard(an.tasks_total,"Tasks total")+statCard(an.steps_executed+"/"+an.steps_total,"Steps executed")+
     statCard(an.approvals_granted,"Approvals granted")+statCard(an.approvals_denied,"Approvals denied")+
@@ -963,6 +1281,14 @@ async function refresh(){
     "<p class='small'>Token mode (required for any non-loopback bind):</p><pre id='cmd-token'>GHOST_AGENT_DASHBOARD_TOKEN=change-me PYTHONPATH=src python3 -m ghost_agent serve --host 0.0.0.0</pre>"+
     "<p><button type='button' class='ghostbtn small' onclick='copyCmd(\\"cmd-token\\")'>Copy</button></p>"+
     "<p class='small'>The dashboard can approve real actions on this machine. Keep it on loopback, or behind the token gate on a trusted network only.</p>";
+  sh+="<div class='seclabel'>State snapshot</div><div id='sys-export'><dl>"+
+    "<dt>Tasks</dt><dd>"+ov.counts.total+"</dd>"+
+    "<dt>Approvals</dt><dd>"+lastApprovals.length+"</dd>"+
+    "<dt>Memories trusted / candidates</dt><dd>"+ov.trusted_memories+" / "+ov.candidate_memories+"</dd>"+
+    "<dt>Skills</dt><dd>"+ov.skills_total+"</dd>"+
+    "<dt>Schedules</dt><dd>"+lastSchedules.length+"</dd>"+
+    "<dt>Trail events</dt><dd>"+ov.trail_events+"</dd></dl>"+
+    "<p><a href='/api/export'><button type='button' class='ghostbtn small'>Download state export (JSON)</button></a></p></div>";
   document.getElementById("system").innerHTML=sh;
   // logs (preserve filter values; skip the fetch while paused)
   const lt=document.getElementById("log-type"), lq=document.getElementById("log-q");
@@ -995,6 +1321,33 @@ document.getElementById("mem-form").addEventListener("submit",async e=>{
     else flash("mem-status","Propose failed: "+((r&&r.error)||"unknown error"),true);
   }catch(err){ flash("mem-status","Propose failed - is the server reachable?",true); }
   refresh();});
+document.getElementById("chat-form").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const g=document.getElementById("chat-input").value.trim();
+  if(!g) return;
+  document.getElementById("chat-input").value="";
+  try{ const r=await j("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:g})});
+    if(r&&r.task){ chatTaskId=r.task.id; flash("chat-status","Task created - running");
+      document.getElementById("chat-picker").value=chatTaskId; loadChatThread(); }
+    else flash("chat-status","Task create failed",true);
+  }catch(err){ flash("chat-status","Task create failed - is the server reachable?",true); }
+  refresh();});
+document.getElementById("sch-form").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const kind=document.getElementById("sch-kind").value;
+  const payload={goal:document.getElementById("sch-goal").value.trim(),
+    title:document.getElementById("sch-title").value.trim()||undefined, kind:kind};
+  if(kind==="interval") payload.interval_minutes=parseInt(document.getElementById("sch-interval").value,10);
+  else payload.time_hhmm=document.getElementById("sch-time").value;
+  try{ const r=await j("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if(r&&r.schedule){ flash("sch-status","Schedule created - next run "+fmtTime(r.schedule.next_run_at));
+      document.getElementById("sch-goal").value=""; document.getElementById("sch-title").value=""; }
+    else flash("sch-status","Create failed: "+((r&&r.error)||"unknown error"),true);
+  }catch(err){ flash("sch-status","Create failed - is the server reachable?",true); }
+  refresh();});
+try{ if(localStorage.getItem("ga-density")==="compact"){
+  document.body.classList.add("compact");
+  document.getElementById("density-btn").textContent="Density: Compact"; } }catch(e){}
 if(AUTH_REQUIRED && !cookieTok()) document.getElementById("loginbox").style.display="block";
 const startPage=(location.hash||"#overview").slice(1);
 showPage(PAGES.includes(startPage)?startPage:"overview");
@@ -1008,7 +1361,8 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
         def log_message(self, *args):  # quiet; tokens are never logged
             pass
 
-        def _send(self, code: int, body, ctype="application/json"):
+        def _send(self, code: int, body, ctype="application/json",
+                  headers: dict | None = None):
             if isinstance(body, (dict, list)):
                 raw = json.dumps(body).encode("utf-8")
             else:
@@ -1016,6 +1370,8 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(raw)))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(raw)
 
@@ -1072,6 +1428,17 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                 return self._send(200, {"approvals": approvals_payload(store, agent)})
             if path == "/api/system":
                 return self._send(200, system_payload(store, agent, token, host))
+            if path == "/api/schedules":
+                return self._send(200, {"schedules": schedules_payload(store)})
+            if path == "/api/search":
+                qs = parse_qs(parsed.query)
+                return self._send(200, search_payload(
+                    store, (qs.get("q") or [""])[0]))
+            if path == "/api/export":
+                return self._send(
+                    200, export_payload(store),
+                    headers={"Content-Disposition":
+                             'attachment; filename="ghost-agent-export.json"'})
             if path == "/api/memory":
                 mem = Memory(store)
                 return self._send(200, {"trusted": mem.list_trusted(),
@@ -1109,6 +1476,58 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                 if not goal:
                     return self._send(400, {"error": "goal is required"})
                 task = agent.create_task(goal, title=data.get("title"))
+                task = agent.run_task(task["id"])
+                return self._send(201, {"task": task})
+            if path == "/api/approvals/decide_all":
+                data = self._body()
+                decision = data.get("decision")
+                if decision not in ("approved", "denied"):
+                    return self._send(
+                        400, {"error": "decision must be 'approved' or 'denied'"})
+                return self._send(200, decide_all(store, agent, decision))
+            if path == "/api/schedules":
+                data = self._body()
+                try:
+                    sched = create_schedule(
+                        store,
+                        (data.get("goal") or ""),
+                        kind=data.get("kind") or "interval",
+                        interval_minutes=data.get("interval_minutes"),
+                        time_hhmm=data.get("time_hhmm"),
+                        title=data.get("title"))
+                except ValueError as exc:
+                    return self._send(400, {"error": str(exc)})
+                return self._send(201, {"schedule": sched})
+            m = re.fullmatch(r"/api/schedules/([A-Za-z0-9_-]+)/(toggle|run)", path)
+            if m:
+                sched_id, action = m.group(1), m.group(2)
+                sched = store.get("schedules", sched_id)
+                if sched is None:
+                    return self._send(404, {"error": "no such schedule"})
+                if action == "toggle":
+                    sched = store.update("schedules", sched_id,
+                                         enabled=not sched.get("enabled", True))
+                    return self._send(200, {"schedule": sched})
+                # run now: create + run a task immediately (governance
+                # untouched — it may pause at waiting_approval)
+                task = agent.create_task(sched["goal"], title=sched.get("title"))
+                task = agent.run_task(task["id"])
+                sched = store.update("schedules", sched_id,
+                                     last_run_at=now_iso(),
+                                     last_task_id=task["id"])
+                return self._send(201, {"schedule": sched, "task": task})
+            m = re.fullmatch(r"/api/tasks/([A-Za-z0-9_-]+)/retry", path)
+            if m:
+                orig = store.get("tasks", m.group(1))
+                if orig is None:
+                    return self._send(404, {"error": "no such task"})
+                if orig.get("status") != "failed":
+                    return self._send(400, {
+                        "error": "only failed tasks can be retried "
+                                 f"(this task is {orig.get('status')})"})
+                title = (orig.get("title") or (orig.get("goal") or "")[:60]) \
+                    + " (retry)"
+                task = agent.create_task(orig["goal"], title=title)
                 task = agent.run_task(task["id"])
                 return self._send(201, {"task": task})
             if path == "/api/memory/propose":
@@ -1150,6 +1569,18 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                 return self._send(200, {"skill": out})
             return self._send(404, {"error": "not found"})
 
+        def do_DELETE(self):
+            path = urlparse(self.path).path
+            if path.startswith("/api/") and not self._require_auth():
+                return
+            m = re.fullmatch(r"/api/schedules/([A-Za-z0-9_-]+)", path)
+            if m:
+                if store.get("schedules", m.group(1)) is None:
+                    return self._send(404, {"error": "no such schedule"})
+                store.delete("schedules", m.group(1))
+                return self._send(200, {"deleted": m.group(1)})
+            return self._send(404, {"error": "not found"})
+
     return Handler
 
 
@@ -1165,15 +1596,42 @@ def make_server(host: str = "127.0.0.1", port: int = 8770,
                                  make_handler(store, agent, token, host))
     server.ghost_token = token  # presence only; never logged
     server.ghost_host = host
+    server.ghost_store = store
+    server.ghost_agent = agent
     return server
+
+
+def _start_scheduler_thread(server) -> threading.Event:
+    """Daemon thread ticking the scheduler every 20 seconds. Only
+    serve() starts it — importing the module or building a server in
+    tests never fires schedules. A failing tick is swallowed so a bad
+    schedule can never take the dashboard down; the trail still shows
+    what did fire."""
+    stop = threading.Event()
+
+    def _loop():
+        while not stop.is_set():
+            try:
+                scheduler_tick(server.ghost_store, server.ghost_agent,
+                               datetime.now().astimezone())
+            except Exception:
+                pass
+            stop.wait(20)
+
+    threading.Thread(target=_loop, daemon=True,
+                     name="ghost-agent-scheduler").start()
+    return stop
 
 
 def serve(host: str = "127.0.0.1", port: int = 8770) -> int:
     server = make_server(host, port)  # raises DashboardConfigError if refused
     print(f"Ghost Agent dashboard on http://{host}:{server.server_address[1]}/")
     print("WARNING: " + (WARNING_TOKEN if server.ghost_token else WARNING))
+    stop = _start_scheduler_thread(server)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        stop.set()
     return 0

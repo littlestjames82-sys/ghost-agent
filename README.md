@@ -36,8 +36,8 @@ needed), or `pip install .` for the `ghost-agent` command.
 # including one approval step (the demo approves it, as a human would).
 PYTHONPATH=src python3 -m ghost_agent demo
 
-# Dashboard v3 (sidebar UI: overview, board, approvals, tasks,
-# memory, skills, analytics, logs, system):
+# Dashboard v4 (sidebar UI: overview, board, approvals, tasks, chat,
+# memory, skills, analytics, logs, schedules, system):
 PYTHONPATH=src python3 -m ghost_agent serve [--host 127.0.0.1] [--port 8770]
 
 # Non-loopback bind (refused unless the token is set):
@@ -49,6 +49,10 @@ PYTHONPATH=src python3 -m ghost_agent approve <task_id>
 PYTHONPATH=src python3 -m ghost_agent deny <task_id>
 PYTHONPATH=src python3 -m ghost_agent memory
 PYTHONPATH=src python3 -m ghost_agent skills
+PYTHONPATH=src python3 -m ghost_agent schedules
+PYTHONPATH=src python3 -m ghost_agent schedule-add "read notes.txt" --kind interval --interval 45
+PYTHONPATH=src python3 -m ghost_agent schedule-add "demo" --kind daily --time 07:15
+PYTHONPATH=src python3 -m ghost_agent schedule-remove <schedule_id>
 ```
 
 State lives under `GHOST_AGENT_HOME` (default `~/.ghost-agent/`):
@@ -112,6 +116,47 @@ is the only place tools may touch.
   `GET /api/system` includes a `health` block (python version,
   store/workspace existence + writability probe, task and trail
   totals, server time).
+* **Dashboard (v4)** — everything in v3, plus two new pages.
+  **Schedules**: recurring tasks — interval (every N minutes) or
+  daily (at HH:MM, server local time). The dashboard server ticks
+  the scheduler every 20 seconds *while it serves*; **schedules
+  only fire while the dashboard server is running** — there is no
+  background daemon when it is stopped. A due schedule fires at
+  most once per tick (missed intervals are skipped, never
+  burst-fired), creates and runs a task through the normal loop,
+  and records a `schedule_fired` trail event. Governance is
+  untouched: a scheduled write/exec step pauses at
+  `waiting_approval` and waits for a human like any other run. The
+  page has a create form and per-schedule toggle / run-now /
+  delete (with confirm). **Chat**: a conversation-style run view —
+  the goal as a user bubble, each step as an agent card with its
+  tool, args, status, and output, inline Approve/Deny while a run
+  waits, a picker to reopen recent tasks, and live polling while
+  the page is open. Also new in v4: a **global search** box in the
+  header (tasks, memories, skills, trail), a **command palette**
+  (Ctrl/Cmd+K: jump to any page, start a demo task, export state),
+  **bulk approvals** (Approve all / Deny all, each decided through
+  the same per-item path and individually trailed; only approvals
+  pending at call time are decided), **task retry** (failed tasks
+  only; creates a new task with the same goal and a "(retry)"
+  title, original untouched), a **state export** download, and a
+  **density toggle** (Comfortable/Compact, persisted in the
+  dashboard origin's localStorage). New APIs:
+  `GET /api/schedules`; `POST /api/schedules`
+  `{goal, kind, interval_minutes|time_hhmm, title?}` (empty goal,
+  interval < 1, or a bad time → 400); `POST /api/schedules/{id}/toggle`;
+  `POST /api/schedules/{id}/run`; `DELETE /api/schedules/{id}`
+  (unknown id → 404 on all three); `GET /api/search?q=` →
+  `{tasks, memories, skills, trail}`, each group capped at 8,
+  trail newest first, empty q → all groups empty;
+  `POST /api/approvals/decide_all` `{decision: "approved"|"denied"}`
+  → `{results, decided, approved, denied}` (bad decision → 400);
+  `POST /api/tasks/{id}/retry` (non-failed → 400, unknown → 404);
+  `GET /api/export` → a JSON state snapshot
+  (`{version, exported_at, tasks, approvals, memories_trusted,
+  memories_candidates, skills, schedules, trail}`) served as an
+  attachment download. The export holds store data only, so it can
+  never contain the dashboard token or a model API key.
 
 ## Models
 
@@ -145,6 +190,10 @@ is the only place tools may touch.
   approval. Approval is the gate; there is no container sandbox.
 * One task runs its steps sequentially in-process; approvals pause a
   run in `waiting_approval` state rather than in a background worker.
+* Schedules fire only while the dashboard server is running (it
+  ticks every 20 seconds). Stop the server and schedules wait —
+  there is no system daemon, cron entry, or cloud trigger behind
+  them.
 * No fine-tuned or foundation model in v1 (out of scope by design).
 
 ## Tests
@@ -153,10 +202,12 @@ is the only place tools may touch.
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate.py -v      # v1 known-answer gate first
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v2.py -v   # v2 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v3.py -v   # v3 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v4.py -v   # v4 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
 See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
-[BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2), and
-[BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3) for gate results and
+[BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2),
+[BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3), and
+[BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4) for gate results and
 counts.

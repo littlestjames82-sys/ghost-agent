@@ -1,4 +1,4 @@
-"""CLI: python -m ghost_agent demo|serve|tasks|approve|deny|memory|skills"""
+"""CLI: python -m ghost_agent demo|serve|tasks|approve|deny|memory|skills|schedules|schedule-add|schedule-remove"""
 from __future__ import annotations
 
 import argparse
@@ -78,6 +78,44 @@ def cmd_skills(args) -> int:
     return 0
 
 
+def cmd_schedules(args) -> int:
+    store, _ = _agent()
+    rows = store.list("schedules")
+    if not rows:
+        print("no schedules")
+        return 0
+    for s in rows:
+        kind = (f"daily at {s.get('time_hhmm')}" if s.get("kind") == "daily"
+                else f"every {s.get('interval_minutes')} min")
+        print(f"{s['id']}  {'on ' if s.get('enabled') else 'off'}  {kind:<16}  "
+              f"next={s.get('next_run_at')}  {s.get('title', '')}")
+    return 0
+
+
+def cmd_schedule_add(args) -> int:
+    from .scheduler import create_schedule
+    store, _ = _agent()
+    try:
+        s = create_schedule(store, args.goal, kind=args.kind,
+                            interval_minutes=args.interval,
+                            time_hhmm=args.time, title=args.title)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps({"id": s["id"], "kind": s["kind"],
+                      "next_run_at": s["next_run_at"]}))
+    return 0
+
+
+def cmd_schedule_remove(args) -> int:
+    store, _ = _agent()
+    if store.delete("schedules", args.schedule_id):
+        print(json.dumps({"deleted": args.schedule_id}))
+        return 0
+    print(json.dumps({"id": args.schedule_id, "status": "not-found"}))
+    return 2
+
+
 def cmd_serve(args) -> int:
     from .server import DashboardConfigError, serve
     try:
@@ -101,10 +139,23 @@ def main(argv: list[str] | None = None) -> int:
     p_d.add_argument("task_id")
     sub.add_parser("memory", help="list trusted + candidate memory")
     sub.add_parser("skills", help="list skills")
+    sub.add_parser("schedules", help="list schedules")
+    p_sa = sub.add_parser("schedule-add", help="create a schedule")
+    p_sa.add_argument("goal")
+    p_sa.add_argument("--kind", default="interval", choices=["interval", "daily"])
+    p_sa.add_argument("--interval", type=int, default=60,
+                      help="minutes between runs (interval kind)")
+    p_sa.add_argument("--time", default=None,
+                      help="HH:MM local time (daily kind)")
+    p_sa.add_argument("--title", default=None)
+    p_sr = sub.add_parser("schedule-remove", help="delete a schedule")
+    p_sr.add_argument("schedule_id")
     args = parser.parse_args(argv)
     fn = {"demo": cmd_demo, "serve": cmd_serve, "tasks": cmd_tasks,
           "approve": cmd_approve, "deny": cmd_deny,
-          "memory": cmd_memory, "skills": cmd_skills}[args.cmd]
+          "memory": cmd_memory, "skills": cmd_skills,
+          "schedules": cmd_schedules, "schedule-add": cmd_schedule_add,
+          "schedule-remove": cmd_schedule_remove}[args.cmd]
     return fn(args)
 
 
