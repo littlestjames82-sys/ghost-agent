@@ -391,6 +391,81 @@ Three fixes from the Nov 2 live gauntlet and ecosystem probes:
   reason in the trail; a failure on any later call fails the task
   instead (see the v0.7.0 loop section above).
 
+## Models and routers (v0.10.0)
+
+* **Provider profiles** — `providers.json` in the agent home
+  names the providers the agent may use:
+
+  ```json
+  {"strategy": "default", "default": null, "chain": ["meta", "openai"],
+   "profiles": {"meta": {"base_url": "https://api.meta.ai/v1",
+                         "model": "muse-spark-1.3",
+                         "api_key_env": "META_API_KEY",
+                         "kind": "openai-compatible"}}}
+  ```
+
+  On first run the file is seeded with ten presets — Meta
+  (`muse-spark-1.3`), OpenAI (`gpt-4o-mini`), OpenRouter,
+  Fireworks, Groq, Together, Gemini (all OpenAI-compatible chat
+  endpoints), keyless local Ollama and LM Studio, and Anthropic
+  (`claude-sonnet-4-5`, `kind: "anthropic"`). The home file
+  wins when present; a malformed file is never overwritten —
+  loading reports a visible `load_error`, records a trail
+  event, and routing falls back to the legacy env behavior.
+* **Keys are referenced by env-var NAME only.** A key value is
+  never written to `providers.json`, the store, or the trail;
+  each adapter reads its named env var at call time. A profile
+  is *configured* when its `api_key_env` is null (keyless
+  local) or that env var is set and non-empty. `/api/system`
+  exposes the profiles with `configured` / `key_present`
+  booleans only — key values never appear there either (the
+  System page renders them with presence pills).
+* **Back-compat.** With no `default` pinned in `providers.json`
+  (the seeded state), behavior is exactly the pre-v0.10.0
+  legacy path: the `GHOST_AGENT_API_KEY` /
+  `GHOST_AGENT_BASE_URL` / `GHOST_AGENT_MODEL` env adapter
+  serves as an implicit `env` profile, with MockModel fallback
+  on a first-call failure.
+* **Strategies** (`strategy` in `providers.json`):
+  * `default` — the profile named in `default` serves; on a
+    first-call failure the task falls back to MockModel with
+    the reason recorded.
+  * `chain` — at the task's FIRST call only, the profiles
+    named in `chain` are tried in order (unconfigured ones
+    skipped); each failure is recorded, the first success
+    owns the task for life, and if every configured chain
+    profile fails the task falls back to MockModel with a
+    combined reason naming the failures.
+  * `cheapest` — among configured profiles whose model has
+    known pricing in the built-in table, the lowest (input +
+    output) per-million sum serves; if no configured profile
+    is priced, it behaves as `default`.
+
+  In every strategy, a mid-task provider failure still fails
+  the task — brains never switch mid-task — and
+  `fallback_reason` records what actually happened.
+* **Per-task override and attribution** — `create_task` /
+  `POST /api/tasks` accept an optional `profile` (the Chat
+  page has a picker; `ghost-agent demo --profile NAME` is the
+  CLI path). An unknown or unconfigured name is an honest
+  creation error (HTTP 400), never a silent substitution.
+  Every task record names its owner in `provider` (a profile
+  name, `env`, or `mock`) alongside `model`; `model_usage`
+  trail events carry the provider, and `/api/analytics` rolls
+  usage up `by_provider` exactly (tasks are
+  single-provider). Scheduler-fired tasks use the strategy —
+  no override.
+* **Anthropic** — profiles with `kind: "anthropic"` speak the
+  Messages API: `POST {base_url}/v1/messages` with `x-api-key`
+  and `anthropic-version: 2023-06-01` headers, `max_tokens`
+  2048, text blocks concatenated, and `input_tokens` /
+  `output_tokens` normalized into the same usage records.
+  Only two Anthropic list prices are in the cost table —
+  `claude-sonnet-4-5` $3.00/$15.00 and `claude-haiku-4-5`
+  $1.00/$5.00 per million (Anthropic's published list
+  prices); every other unpriced model stays cost `unknown`,
+  as before.
+
 ## Honest limits
 
 * MockModel is deterministic, not intelligent. Real planning quality
@@ -429,6 +504,7 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7.py -v   # v7 known-an
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7b.py -v  # v7b live-fix gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v8.py -v   # v8 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v9.py -v   # v9 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v10.py -v  # v10 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
@@ -439,9 +515,10 @@ See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5),
 [BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6),
 [BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7),
-[BUILD_REPORT_V8.md](BUILD_REPORT_V8.md) (v8), and
-[BUILD_REPORT_V9.md](BUILD_REPORT_V9.md) (v9) for gate results and
-counts.
+[BUILD_REPORT_V8.md](BUILD_REPORT_V8.md) (v8),
+[BUILD_REPORT_V9.md](BUILD_REPORT_V9.md) (v9), and
+[BUILD_REPORT_V10.md](BUILD_REPORT_V10.md) (v10) for gate results
+and counts.
 
 ## Design language (v0.5.0)
 

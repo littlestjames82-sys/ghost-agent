@@ -4,14 +4,35 @@ MockModel: deterministic, rule-based planner for tests and the demo.
 It is NOT intelligent; it pattern-matches a small set of phrasings.
 
 OpenAICompatibleModel: talks to an OpenAI-compatible /chat/completions
-endpoint via urllib. The API key is read from the GHOST_AGENT_API_KEY
-environment variable at call time and is never stored or logged.
-Base URL: GHOST_AGENT_BASE_URL (default https://api.openai.com/v1).
-Model name: GHOST_AGENT_MODEL (default "gpt-4o-mini").
+endpoint via urllib. The API key is read from an environment variable
+at call time (GHOST_AGENT_API_KEY by default; a provider profile
+names its own variable — see providers.py) and is never stored or
+logged. Base URL: GHOST_AGENT_BASE_URL (default
+https://api.openai.com/v1). Model name: GHOST_AGENT_MODEL (default
+"gpt-4o-mini"). A keyless profile (api_key_env None — Ollama, LM
+Studio) sends no Authorization header at all.
+
+AnthropicModel (v0.10.0): the native Messages API — POST
+{base_url}/v1/messages with x-api-key + anthropic-version headers;
+the reply's text blocks are concatenated into the same plan/step
+shapes the OpenAI adapter produces, and its usage
+{input_tokens, output_tokens} normalizes into the same records.
 
 Router: prefers the real provider when a key is configured, otherwise
 MockModel. On provider failure it falls back to MockModel and reports
 the fallback reason so the agent loop can record it in the trail.
+
+Provider profiles + strategies (v0.10.0): when a Providers config
+(providers.py) is attached, the router's FIRST call for a task is
+resolved by the configured strategy — "default" (the named default
+profile, else the legacy env adapter), "chain" (the chain's
+configured profiles in order; first success owns the task, failures
+are recorded), "cheapest" (the lowest-priced configured profile
+whose model has known pricing, else "default" behavior) — or by an
+explicit per-task profile override. Every result names its owner in
+"provider" (a profile name, "env", or "mock"). Once a task has an
+owner, later calls go to that owner only: a mid-task provider
+failure raises, it never switches brains.
 
 Usage accounting (v0.6.0): every plan() call records a usage record
 on the model (``last_usage``) and the Router returns it. Provider
@@ -45,6 +66,13 @@ MODEL_PRICING_USD_PER_MILLION = {
     # 2026): $1.25 input / $4.25 output per million. The prefix
     # covers muse-spark-1.3 and its contributor variants.
     "muse-spark": (1.25, 4.25),
+    # Anthropic's published list prices for the Claude 4.5 family
+    # (anthropic.com/pricing, as of Nov 2026): Sonnet 4.5 at
+    # $3.00 input / $15.00 output per million, Haiku 4.5 at
+    # $1.00 / $5.00. Exact-name prefixes: other Claude models
+    # stay unpriced ("unknown") rather than guessed.
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
 }
 
 
@@ -328,20 +356,35 @@ class OpenAICompatibleModel:
     name = "openai-compatible"
     is_mock = False
 
-    def __init__(self, base_url: str | None = None, model: str | None = None):
+    def __init__(self, base_url: str | None = None, model: str | None = None,
+                 api_key_env: str | None = "GHOST_AGENT_API_KEY"):
         self.base_url = (base_url or os.environ.get("GHOST_AGENT_BASE_URL")
                          or "https://api.openai.com/v1").rstrip("/")
         self.model = model or os.environ.get("GHOST_AGENT_MODEL") or "gpt-4o-mini"
+        # The env var holding this adapter's key (a provider
+        # profile names its own; None = keyless local server).
+        self.api_key_env = api_key_env
         self.last_usage: dict | None = None
         # Legacy full-plan answers to a next-step request, keyed by
         # goal and served stepwise by history index (see next_step).
         self._plan_cache: dict[str, list[dict]] = {}
 
+    def _headers(self) -> dict:
+        """Request headers for one call. The key is read from the
+        adapter's env variable at call time and used in-memory
+        only; a keyless adapter sends no Authorization header.
+        Raises ModelError when a named variable is unset — the
+        same failure shape the legacy path has always produced."""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key_env is not None:
+            key = os.environ.get(self.api_key_env)
+            if not key:
+                raise ModelError(f"{self.api_key_env} is not set")
+            headers["Authorization"] = "Bearer " + key
+        return headers
+
     def plan(self, goal: str) -> list[dict]:
         self.last_usage = None
-        key = os.environ.get("GHOST_AGENT_API_KEY")
-        if not key:
-            raise ModelError("GHOST_AGENT_API_KEY is not set")
         prompt = build_planner_prompt(goal)
         body = json.dumps({
             "model": self.model,
@@ -349,8 +392,7 @@ class OpenAICompatibleModel:
         }).encode("utf-8")
         req = urllib.request.Request(
             self.base_url + "/chat/completions", data=body, method="POST",
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + key},  # key used in-memory only
+            headers=self._headers(),
         )
         try:
             with urllib.request.urlopen(req, timeout=90) as resp:
@@ -381,17 +423,13 @@ class OpenAICompatibleModel:
     def _post(self, prompt: str) -> dict:
         """One chat/completions round trip. Raises ModelError on
         transport failure; records last_usage on success."""
-        key = os.environ.get("GHOST_AGENT_API_KEY")
-        if not key:
-            raise ModelError("GHOST_AGENT_API_KEY is not set")
         body = json.dumps({
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
         }).encode("utf-8")
         req = urllib.request.Request(
             self.base_url + "/chat/completions", data=body, method="POST",
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + key},  # key used in-memory only
+            headers=self._headers(),
         )
         try:
             with urllib.request.urlopen(req, timeout=90) as resp:
@@ -476,18 +514,246 @@ class OpenAICompatibleModel:
         return step
 
 
-class Router:
-    """Picks a model and falls back to MockModel on provider failure."""
+class AnthropicModel:
+    """The native Anthropic Messages API adapter (v0.10.0).
 
-    def __init__(self, prefer_real: bool | None = None):
+    POST {base_url}/v1/messages, the key carried in the x-api-key
+    header (read from the adapter's env variable at call time,
+    in-memory only) and anthropic-version: 2023-06-01. The reply
+    content is a list of blocks; the text blocks are concatenated
+    and parsed with exactly the plan/step shapes the
+    OpenAI-compatible adapter accepts (a JSON array plan, one
+    step object, or {"tool": "done"} — including the legacy
+    full-plan buffering). usage {input_tokens, output_tokens}
+    normalizes into the provider usage record as prompt/
+    completion tokens.
+    """
+    name = "anthropic"
+    is_mock = False
+
+    def __init__(self, base_url: str | None = None, model: str | None = None,
+                 api_key_env: str | None = "ANTHROPIC_API_KEY"):
+        self.base_url = (base_url or "https://api.anthropic.com").rstrip("/")
+        self.model = model or "claude-sonnet-4-5"
+        self.api_key_env = api_key_env
+        self.last_usage: dict | None = None
+        # Legacy full-plan answers to a next-step request, keyed by
+        # goal and served stepwise by history index (see next_step).
+        self._plan_cache: dict[str, list[dict]] = {}
+
+    def _headers(self) -> dict:
+        headers = {"content-type": "application/json",
+                   "anthropic-version": "2023-06-01"}
+        if self.api_key_env is not None:
+            key = os.environ.get(self.api_key_env)
+            if not key:
+                raise ModelError(f"{self.api_key_env} is not set")
+            headers["x-api-key"] = key
+        return headers
+
+    def _post(self, prompt: str) -> dict:
+        """One /v1/messages round trip. Raises ModelError on
+        transport failure; records last_usage on success."""
+        body = json.dumps({
+            "model": self.model,
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + "/v1/messages", data=body, method="POST",
+            headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise ModelError(f"provider request failed: {type(exc).__name__}") from exc
+        if not isinstance(payload, dict):
+            raise ModelError("provider returned an unusable response")
+        raw = payload.get("usage")
+        raw = raw if isinstance(raw, dict) else {}
+        self.last_usage = usage_record(
+            payload.get("model") or self.model, "provider",
+            {"prompt_tokens": raw.get("input_tokens"),
+             "completion_tokens": raw.get("output_tokens")},
+            adapter=self.name)
+        return payload
+
+    @staticmethod
+    def _content_text(payload: dict) -> str:
+        """The reply's text: its text blocks concatenated. A
+        reply with no usable text block — including an empty
+        content list — is an empty response: the same ModelError
+        the OpenAI adapter raises for a null message content."""
+        blocks = payload.get("content")
+        if not isinstance(blocks, list):
+            raise ModelError("provider returned an empty response")
+        text = "".join(
+            b.get("text") or "" for b in blocks
+            if isinstance(b, dict) and b.get("type") == "text")
+        if not text.strip():
+            raise ModelError("provider returned an empty response")
+        return text
+
+    def plan(self, goal: str) -> list[dict]:
+        self.last_usage = None
+        payload = self._post(build_planner_prompt(goal))
+        content = self._content_text(payload)
+        try:
+            start, end = content.index("["), content.rindex("]") + 1
+            steps = json.loads(content[start:end])
+            if not isinstance(steps, list) or not steps:
+                raise ValueError("empty plan")
+            for s in steps:
+                if not isinstance(s, dict) or "tool" not in s:
+                    raise ValueError("bad step")
+                s.setdefault("args", {})
+                s.setdefault("verify", {"type": "ok"})
+            return steps
+        except ValueError as exc:
+            raise ModelError(f"provider returned an unusable plan: {type(exc).__name__}") from exc
+
+    # ---- plan-act-observe (same contract as the OpenAI adapter) --------
+    @staticmethod
+    def _normalize_step(step) -> dict:
+        if not isinstance(step, dict) or "tool" not in step:
+            raise ValueError("bad step")
+        step = dict(step)
+        step.setdefault("args", {})
+        step.setdefault("verify", {"type": "ok"})
+        return step
+
+    def _serve_cached(self, goal: str, history: list[dict]) -> dict | None:
+        """Serve a buffered full-plan answer by history index
+        (see OpenAICompatibleModel._serve_cached)."""
+        steps = self._plan_cache.get(goal)
+        if steps is None:
+            return None
+        idx = len(history or [])
+        if idx >= len(steps):
+            del self._plan_cache[goal]
+            return None
+        return self._normalize_step(steps[idx])
+
+    def next_step(self, goal: str, history: list[dict]) -> dict | None:
+        """Ask the provider for the NEXT step given the history.
+        Same contract as OpenAICompatibleModel.next_step: one
+        step dict, or None on {"tool": "done"}; ModelError on
+        failure; a legacy full-plan array is buffered and served
+        stepwise with its usage recorded once, when fetched."""
+        self.last_usage = None
+        if goal in self._plan_cache:
+            return self._serve_cached(goal, history)
+        payload = self._post(build_next_step_prompt(goal, history))
+        content = self._content_text(payload)
+        i_obj = content.find("{")
+        i_arr = content.find("[")
+        try:
+            if i_arr != -1 and (i_obj == -1 or i_arr < i_obj):
+                raw = json.loads(content[i_arr:content.rindex("]") + 1])
+                if not isinstance(raw, list) or not raw:
+                    raise ValueError("empty plan")
+                steps = [self._normalize_step(s) for s in raw]
+                self._plan_cache[goal] = steps
+                return self._serve_cached(goal, history)
+            if i_obj == -1:
+                raise ValueError("no step object")
+            step, _ = json.JSONDecoder().raw_decode(content[i_obj:])
+            step = self._normalize_step(step)
+        except ValueError as exc:
+            raise ModelError(
+                f"provider returned an unusable step: {type(exc).__name__}") from exc
+        if step.get("tool") == "done":
+            return None
+        return step
+
+
+class Router:
+    """Picks a model and falls back to MockModel on provider failure.
+
+    v0.10.0: a Providers config (providers.py) may be attached.
+    With one, a task's FIRST next-step call is resolved by the
+    configured strategy (default / chain / cheapest) or by an
+    explicit per-task profile override; without one — or when the
+    config names nothing configured — the router behaves exactly
+    as before: the legacy env adapter (self.real, the implicit
+    "env" profile) serves, with MockModel fallback on first-call
+    failure. Every result names the task's owner in "provider":
+    a profile name, "env", or "mock".
+    """
+
+    def __init__(self, prefer_real: bool | None = None, providers=None):
         if prefer_real is None:
             prefer_real = bool(os.environ.get("GHOST_AGENT_API_KEY"))
         self.prefer_real = prefer_real
+        self.providers = providers
         self.mock = MockModel()
         self.real = OpenAICompatibleModel() if prefer_real else None
+        self._profile_adapters: dict[str, object] = {}
 
+    # ---- profile adapters ------------------------------------------------
+    def _adapter_for(self, name: str):
+        """The (cached) adapter for a configured profile name.
+        Raises ModelError for an unknown profile — callers that
+        accept user input validate first (Agent.create_task)."""
+        adapter = self._profile_adapters.get(name)
+        if adapter is not None:
+            return adapter
+        profile = self.providers.get(name) if self.providers else None
+        if profile is None:
+            raise ModelError(f"unknown provider profile: {name}")
+        if profile.get("kind") == "anthropic":
+            adapter = AnthropicModel(base_url=profile["base_url"],
+                                     model=profile["model"],
+                                     api_key_env=profile["api_key_env"])
+        else:
+            adapter = OpenAICompatibleModel(
+                base_url=profile["base_url"], model=profile["model"],
+                api_key_env=profile["api_key_env"])
+        self._profile_adapters[name] = adapter
+        return adapter
+
+    # ---- result shaping ----------------------------------------------------
+    @staticmethod
+    def _with_provider(usage, provider: str):
+        """A copy of an adapter's usage record carrying the
+        owning provider's name (the trail's model_usage detail
+        and the task record both keep it)."""
+        if usage is None:
+            return None
+        out = dict(usage)
+        out["provider"] = provider
+        return out
+
+    def _adapter_result(self, adapter, step: dict | None,
+                        provider: str) -> dict:
+        return {"step": step, "done": step is None,
+                "model": adapter.name,
+                "usage": self._with_provider(
+                    getattr(adapter, "last_usage", None), provider),
+                "fallback_reason": None, "provider": provider}
+
+    def _real_result(self, step: dict | None) -> dict:
+        return {"step": step, "done": step is None,
+                "model": self.real.name,
+                "usage": self._with_provider(
+                    getattr(self.real, "last_usage", None), "env"),
+                "fallback_reason": None, "provider": "env"}
+
+    def _mock_result(self, step: dict | None,
+                     fallback_reason: str | None = None) -> dict:
+        return {"step": step, "done": step is None,
+                "model": self.mock.name,
+                "usage": self._with_provider(self.mock.last_usage, "mock"),
+                "fallback_reason": fallback_reason, "provider": "mock"}
+
+    # ---- legacy full-plan interface ---------------------------------------
     def plan(self, goal: str, task_type: str | None = None) -> dict:
-        """Returns {steps, model, fallback_reason, usage}."""
+        """Returns {steps, model, fallback_reason, usage, provider}.
+
+        The pre-loop planning interface, kept for compatibility:
+        it speaks to the legacy env adapter (self.real) exactly as
+        it always has — strategies govern the agent loop's
+        next-step calls, not this legacy path."""
         if self.real is not None:
             try:
                 steps = self.real.plan(goal)
@@ -495,67 +761,180 @@ class Router:
                     getattr(self.real, "model", None) or self.real.name,
                     "provider", None, adapter=self.real.name)
                 return {"steps": steps, "model": self.real.name,
-                        "fallback_reason": None, "usage": usage}
+                        "fallback_reason": None,
+                        "usage": self._with_provider(usage, "env"),
+                        "provider": "env"}
             except ModelError as exc:
                 return {"steps": self.mock.plan(goal), "model": self.mock.name,
                         "fallback_reason": str(exc),
-                        "usage": self.mock.last_usage}
+                        "usage": self._with_provider(self.mock.last_usage,
+                                                     "mock"),
+                        "provider": "mock"}
         return {"steps": self.mock.plan(goal), "model": self.mock.name,
-                "fallback_reason": None, "usage": self.mock.last_usage}
+                "fallback_reason": None,
+                "usage": self._with_provider(self.mock.last_usage, "mock"),
+                "provider": "mock"}
 
-    # ---- plan-act-observe (v0.7.0) ------------------------------------
-    def _real_next_step(self, goal: str, history: list[dict]) -> dict | None:
-        """One next-step call against the real adapter. Adapters
-        that only implement the legacy full-plan interface are
-        served stepwise from their plan by history index (their
-        own ModelError still propagates verbatim)."""
-        nxt = getattr(self.real, "next_step", None)
+    # ---- plan-act-observe (v0.7.0; profiles + strategies v0.10.0) ---------
+    @staticmethod
+    def _adapter_next_step(adapter, goal: str,
+                           history: list[dict]) -> dict | None:
+        """One next-step call against one adapter. Adapters that
+        only implement the legacy full-plan interface are served
+        stepwise from their plan by history index (their own
+        ModelError still propagates verbatim)."""
+        nxt = getattr(adapter, "next_step", None)
         if nxt is not None:
             return nxt(goal, history)
-        steps = self.real.plan(goal)
+        steps = adapter.plan(goal)
         idx = len(history or [])
         if idx >= len(steps):
             return None
         step = steps[idx]
         return dict(step, args=dict(step.get("args") or {}))
 
-    def _real_result(self, step: dict | None) -> dict:
-        return {"step": step, "done": step is None,
-                "model": self.real.name,
-                "usage": getattr(self.real, "last_usage", None),
-                "fallback_reason": None}
+    def _real_next_step(self, goal: str, history: list[dict]) -> dict | None:
+        return self._adapter_next_step(self.real, goal, history)
 
-    def _mock_result(self, step: dict | None,
-                     fallback_reason: str | None = None) -> dict:
-        return {"step": step, "done": step is None,
-                "model": self.mock.name,
-                "usage": self.mock.last_usage,
-                "fallback_reason": fallback_reason}
+    def _call_profile(self, name: str, goal: str,
+                      history: list[dict]) -> dict:
+        """One first call against a named profile. ModelError
+        propagates — the strategy layer decides what a failure
+        means; mid-task calls let it fail the task."""
+        adapter = self._adapter_for(name)
+        step = self._adapter_next_step(adapter, goal, history)
+        return self._adapter_result(adapter, step, name)
+
+    def _try_profile(self, name: str, goal: str, history: list[dict],
+                     failures: list[str]) -> dict | None:
+        """One strategy attempt against a named profile: the
+        result on success, or None with the failure appended to
+        `failures` (as "name: reason") for the record."""
+        try:
+            return self._call_profile(name, goal, history)
+        except ModelError as exc:
+            failures.append(f"{name}: {exc}")
+            return None
+
+    def _mock_fallback(self, goal: str, history: list[dict],
+                       reason: str) -> dict:
+        return self._mock_result(self.mock.next_step(goal, history),
+                                 fallback_reason=reason)
+
+    def _first_call(self, goal: str, history: list[dict],
+                    requested: str | None) -> dict:
+        """Resolve a task's FIRST next-step call: an explicit
+        profile override when given, else the configured
+        strategy, else the legacy env behavior. First-call
+        provider failures fall back to MockModel with the reason
+        recorded — the v0.7.0 honesty rule, unchanged."""
+        if requested is not None:
+            # Agent.create_task validated the name; a failure here
+            # is a provider failure like any other first call.
+            failures: list[str] = []
+            result = self._try_profile(requested, goal, history, failures)
+            if result is not None:
+                return result
+            return self._mock_fallback(goal, history, failures[0])
+        providers = self.providers
+        strategy = providers.strategy if providers is not None else "default"
+        if providers is not None and strategy == "chain":
+            failures: list[str] = []
+            for name in providers.chain:
+                profile = providers.get(name)
+                if profile is None or not providers.configured(profile):
+                    continue  # unconfigured chain entries are skipped
+                result = self._try_profile(name, goal, history, failures)
+                if result is not None:
+                    if failures:
+                        # The chain hopped: record what it hopped
+                        # over, even though a real provider serves.
+                        result["fallback_reason"] = \
+                            "chain fallback: " + "; ".join(failures)
+                    return result
+            if failures:
+                return self._mock_fallback(
+                    goal, history,
+                    "chain failed: " + "; ".join(failures))
+            return self._mock_fallback(
+                goal, history,
+                "chain strategy: no configured profiles to try")
+        if providers is not None and strategy == "cheapest":
+            pick = self._cheapest_pick()
+            if pick is not None:
+                failures = []
+                result = self._try_profile(pick, goal, history, failures)
+                if result is not None:
+                    return result
+                return self._mock_fallback(goal, history, failures[0])
+            # No configured profile is priced: behave as "default".
+        if providers is not None and providers.default:
+            profile = providers.get(providers.default)
+            if profile is not None and providers.configured(profile):
+                failures = []
+                result = self._try_profile(providers.default, goal,
+                                           history, failures)
+                if result is not None:
+                    return result
+                return self._mock_fallback(goal, history, failures[0])
+        # Legacy env behavior (exactly v0.9.0): self.real serves,
+        # MockModel when there is no real adapter.
+        if self.real is not None:
+            try:
+                return self._real_result(
+                    self._real_next_step(goal, history))
+            except ModelError as exc:
+                return self._mock_fallback(goal, history, str(exc))
+        return self._mock_result(self.mock.next_step(goal, history))
+
+    def _cheapest_pick(self) -> str | None:
+        """The cheapest strategy's pick: among CONFIGURED
+        profiles whose model has known pricing, the lowest
+        (input + output) per-million sum — estimate_cost_usd at
+        1M/1M is exactly that sum. None when no configured
+        profile is priced."""
+        providers = self.providers
+        if providers is None:
+            return None
+        best: tuple[float, str] | None = None
+        for name, profile in providers.profiles.items():
+            if not providers.configured(profile):
+                continue
+            total = estimate_cost_usd(profile["model"], 1_000_000, 1_000_000)
+            if total is None:
+                continue
+            if best is None or total < best[0]:
+                best = (total, name)
+        return best[1] if best is not None else None
 
     def next_step(self, goal: str, history: list[dict],
-                  brain: str | None = None) -> dict:
+                  brain: str | None = None,
+                  provider: str | None = None) -> dict:
         """One plan-act-observe call. Returns {step, done, model,
-        usage, fallback_reason}; step is None when the model is
-        done.
+        usage, fallback_reason, provider}; step is None when the
+        model is done.
 
         Fallback honesty: with brain=None (a task's FIRST call) a
         provider failure falls back to MockModel for the whole
-        task, exactly as plan() always did, with the reason
-        reported. Once a task has a brain (its recorded model
-        name), calls go to that brain only — a provider failure
-        raises ModelError so the agent can fail the task honestly
-        instead of silently switching brains mid-task.
+        task, with the reason reported. Once a task has a brain
+        (its recorded model name) and an owner (its recorded
+        provider), calls go to that owner only — a provider
+        failure raises ModelError so the agent can fail the task
+        honestly instead of silently switching brains mid-task.
         """
         if brain is None:
-            if self.real is not None:
-                try:
-                    return self._real_result(
-                        self._real_next_step(goal, history))
-                except ModelError as exc:
-                    return self._mock_result(
-                        self.mock.next_step(goal, history),
-                        fallback_reason=str(exc))
-            return self._mock_result(self.mock.next_step(goal, history))
+            return self._first_call(goal, history, provider)
+        if provider is not None and provider not in ("env", "mock"):
+            # The task is owned by a named profile.
+            if brain == self.mock.name:
+                return self._mock_result(self.mock.next_step(goal, history))
+            adapter = self._adapter_for(provider)
+            if brain != adapter.name:
+                raise ModelError(f"unknown brain for task: {brain}")
+            return self._adapter_result(
+                adapter,
+                self._adapter_next_step(adapter, goal, history),
+                provider)
         if brain == self.mock.name:
             return self._mock_result(self.mock.next_step(goal, history))
         # The task's brain is the real provider. If this process

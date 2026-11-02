@@ -18,7 +18,12 @@ def _agent() -> tuple[Store, Agent]:
 
 def cmd_demo(args) -> int:
     store, agent = _agent()
-    task = agent.create_task("demo", title="Ghost Agent demo")
+    try:
+        task = agent.create_task("demo", title="Ghost Agent demo",
+                                 profile=getattr(args, "profile", None))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     task = agent.run_task(task["id"])
     print(f"task {task['id']}: after first run -> {task['status']}")
     if task["status"] == "waiting_approval":
@@ -128,7 +133,10 @@ def cmd_serve(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ghost-agent", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("demo", help="seed and run one full demo task (MockModel)")
+    p_demo = sub.add_parser("demo", help="seed and run one full demo task (MockModel)")
+    p_demo.add_argument("--profile", default=None,
+                        help="provider profile for the task (providers.json); "
+                             "default: the router strategy decides")
     p_serve = sub.add_parser("serve", help="run the dashboard server")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8770)

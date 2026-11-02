@@ -68,6 +68,7 @@ from . import __version__
 from .agent import Agent
 from .ecosystem import LAYER_ORDER, get_ecosystem
 from .memory import Memory
+from .providers import get_providers
 from .scheduler import create_schedule, tick as scheduler_tick
 from .skills import Skills
 from .store import Store, new_id, now_iso
@@ -236,7 +237,34 @@ def _usage_summary(store: Store) -> dict:
     known_cost = 0.0
     unknown_provider_calls = 0
     by_model: dict[str, dict] = {}
+    by_provider: dict[str, dict] = {}
     for t in store.list("tasks"):
+        # v0.10.0: the by_provider rollup. A task is owned by
+        # exactly one provider, so this rolls up the task records
+        # exactly: each task's usage_totals lands under its
+        # recorded provider (pre-v0.10.0 records derive it from
+        # the model: "mock" for MockModel, "env" otherwise).
+        prov = t.get("provider")
+        if not prov:
+            prov = "mock" if (t.get("model") == "mock") else "env"
+        ptotals = t.get("usage_totals")
+        ptotals = ptotals if isinstance(ptotals, dict) else {}
+        pentry = by_provider.setdefault(prov, {
+            "tasks": 0, "calls": 0, "prompt_tokens": 0,
+            "completion_tokens": 0, "total_tokens": 0,
+            "estimated_cost_usd": 0.0, "cost_status": "not_applicable",
+            "_unknown": False, "_estimated": False})
+        pentry["tasks"] += 1
+        pentry["calls"] += ptotals.get("calls") or 0
+        pentry["prompt_tokens"] += ptotals.get("prompt_tokens") or 0
+        pentry["completion_tokens"] += ptotals.get("completion_tokens") or 0
+        pentry["total_tokens"] += ptotals.get("total_tokens") or 0
+        if ptotals.get("cost_status") == "unknown":
+            pentry["_unknown"] = True
+        elif ptotals.get("cost_status") == "estimated":
+            pentry["_estimated"] = True
+            pentry["estimated_cost_usd"] += \
+                ptotals.get("estimated_cost_usd") or 0
         models = t.get("usage_by_model")
         if not isinstance(models, dict) or not models:
             totals = t.get("usage_totals")
@@ -296,6 +324,15 @@ def _usage_summary(store: Store) -> dict:
         estimated, status = None, "unknown"
     else:
         estimated, status = round(known_cost, 6), "estimated"
+    for pentry in by_provider.values():
+        if pentry["_unknown"]:
+            pentry["estimated_cost_usd"] = None
+            pentry["cost_status"] = "unknown"
+        elif pentry["_estimated"]:
+            pentry["estimated_cost_usd"] = round(
+                pentry["estimated_cost_usd"], 6)
+            pentry["cost_status"] = "estimated"
+        del pentry["_unknown"], pentry["_estimated"]
     return {
         "tracked": True,
         "calls": calls,
@@ -309,6 +346,7 @@ def _usage_summary(store: Store) -> dict:
         "cost_status": status,
         "cost_unknown_calls": unknown_provider_calls,
         "by_model": by_model,
+        "by_provider": by_provider,
     }
 
 
@@ -399,6 +437,11 @@ def system_payload(store: Store, agent: Agent, token: str | None,
         "model_name": model_name,
         "token_budget": getattr(agent, "token_budget", None),
         "api_key_present": bool(os.environ.get("GHOST_AGENT_API_KEY")),
+        # v0.10.0: the provider profiles + strategy. Presence
+        # booleans only — key values are never read here, so they
+        # can never appear in this payload.
+        "providers": (getattr(agent, "providers", None)
+                      or get_providers(store)).system_block(),
         "auth": {
             "token_required": bool(token),
             "token_env": TOKEN_ENV,
@@ -1175,6 +1218,7 @@ body.compact .tile{flex-basis:34px;width:34px;height:34px}
  <div class="statusline" id="chat-status"></div>
  <form id="chat-form" class="composer">
   <input id="chat-input" placeholder="Message Ghost Agent..." autocomplete="off" required>
+  <select id="chat-profile" title="Provider profile for this task (blank: the router strategy decides)"></select>
   <button type="submit">Send</button>
  </form>
 </section>
@@ -1346,7 +1390,19 @@ function usageHtml(u){
     h+="<p>Estimated cost: $0.00 - MockModel only, no provider usage.</p>";
   const totals={}; Object.entries(u.by_model||{}).forEach(([k,v])=>{ totals[k]=v.total_tokens; });
   h+="<div class='seclabel'>Tokens by model</div>"+bars(totals);
+  const provs={}; Object.entries(u.by_provider||{}).forEach(([k,v])=>{ provs[k]=v.total_tokens; });
+  if(Object.keys(provs).length) h+="<div class='seclabel'>Tokens by provider</div>"+bars(provs);
   return h;
+}
+let provSig="";
+function fillChatProfiles(pv){
+  const sel=document.getElementById("chat-profile"); if(!sel) return;
+  const names=pv?Object.keys(pv.profiles||{}):[];
+  const sig=names.join("|"); if(sig===provSig) return; provSig=sig;
+  const cur=sel.value;
+  sel.innerHTML="<option value=''>strategy default</option>"+names.map(n=>{ const p=pv.profiles[n]||{};
+    return "<option value='"+esc(n)+"'"+(p.configured?"":" disabled")+">"+esc(n+(p.configured?"":" (not configured)"))+"</option>"; }).join("");
+  if(names.includes(cur)) sel.value=cur;
 }
 const STATUS_COLORS={done:"#3ecf6e",failed:"#ff5c5c",waiting_approval:"#ffb43a",running:"#a678ff",pending:"#5ea8ff",unknown:"#8a86a3"};
 function donut(obj){
@@ -1909,6 +1965,18 @@ async function refresh(){
     "<dt>Model API key present</dt><dd>"+(sys.api_key_present?"yes (value never shown or logged)":"no - MockModel planning")+"</dd>"+
     "<dt>Auth mode</dt><dd>"+esc(sys.auth.mode)+"</dd>"+
     "<dt>Local-only warning</dt><dd>"+esc(sys.warning)+"</dd></dl>";
+  const pv=sys.providers||null;
+  if(pv){
+    sh+="<div class='seclabel'>Model providers</div>";
+    if(pv.load_error) sh+="<p class='small'>providers.json could not be loaded ("+esc(pv.load_error)+") - routing falls back to the legacy env profile.</p>";
+    sh+="<p class='small'>Strategy <b>"+esc(pv.strategy)+"</b> - default profile <b>"+esc(pv.default||"(none - legacy env)")+"</b>"+((pv.chain&&pv.chain.length)?" - chain: "+pv.chain.map(esc).join(" &rarr; "):"")+"</p>";
+    sh+="<dl>"+Object.entries(pv.profiles||{}).map(([n,p])=>
+      "<dt>"+esc(n)+"</dt><dd>"+esc(p.model)+" <span class='pill'>"+esc(p.kind)+"</span> "+
+      (p.configured?"<span class='pill'>configured</span>":"<span class='pill'>not configured</span>")+" "+
+      (p.api_key_env?(p.key_present?"<span class='pill'>key present: "+esc(p.api_key_env)+"</span>":"<span class='pill'>key missing: "+esc(p.api_key_env)+"</span>"):"<span class='pill'>keyless (local)</span>")+
+      "<br><span class='small'>"+esc(p.base_url)+"</span></dd>").join("")+"</dl>";
+  }
+  fillChatProfiles(pv);
   sh+="<div class='shelf shelf-green'><div class='shelf-h'><span class='sl'>Health</span></div><div id='sys-health'><dl>"+
     "<dt>Python version</dt><dd>"+esc(h.python_version||"-")+"</dd>"+
     "<dt>Server time (UTC)</dt><dd>"+esc(h.server_time_utc||"-")+"</dd>"+
@@ -1978,10 +2046,12 @@ document.getElementById("chat-form").addEventListener("submit",async e=>{
   const g=document.getElementById("chat-input").value.trim();
   if(!g) return;
   document.getElementById("chat-input").value="";
-  try{ const r=await j("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:g})});
+  const prof=document.getElementById("chat-profile").value;
+  const payload={goal:g}; if(prof) payload.profile=prof;
+  try{ const r=await j("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     if(r&&r.task){ chatTaskId=r.task.id; flash("chat-status","Task created - running");
       document.getElementById("chat-picker").value=chatTaskId; loadChatThread(); }
-    else flash("chat-status","Task create failed",true);
+    else flash("chat-status","Task create failed"+((r&&r.error)?": "+r.error:""),true);
   }catch(err){ flash("chat-status","Task create failed - is the server reachable?",true); }
   refresh();});
 document.getElementById("sch-form").addEventListener("submit",async e=>{
@@ -2145,7 +2215,15 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
                 goal = (data.get("goal") or data.get("title") or "").strip()
                 if not goal:
                     return self._send(400, {"error": "goal is required"})
-                task = agent.create_task(goal, title=data.get("title"))
+                # Optional per-task provider override (v0.10.0):
+                # an unknown or unconfigured profile name is a
+                # 400, never a silent substitution.
+                try:
+                    task = agent.create_task(
+                        goal, title=data.get("title"),
+                        profile=data.get("profile") or None)
+                except ValueError as exc:
+                    return self._send(400, {"error": str(exc)})
                 task = agent.run_task(task["id"])
                 return self._send(201, {"task": task})
             if path == "/api/import":

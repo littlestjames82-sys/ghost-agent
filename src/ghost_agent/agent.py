@@ -43,6 +43,7 @@ from pathlib import Path
 from . import governance
 from .ecosystem import get_ecosystem
 from .models import ModelError, Router
+from .providers import get_providers
 from .skills import Skills
 from .store import Store, new_id
 from .tools import Tools, ToolError, validate_args
@@ -76,7 +77,17 @@ class Agent:
     def __init__(self, store: Store, router: Router | None = None,
                  workspace: str | Path | None = None):
         self.store = store
-        self.router = router or Router()
+        # The provider profiles (v0.10.0): loaded from the home's
+        # providers.json (seeded on first run), shared with the
+        # router for strategy resolution and with the dashboard
+        # via get_providers. A router constructed by a caller
+        # keeps its own config when it already carries one.
+        self.providers = get_providers(store)
+        if router is None:
+            router = Router(providers=self.providers)
+        elif getattr(router, "providers", None) is None:
+            router.providers = self.providers
+        self.router = router
         # The ecosystem registry (v0.8.0) backs the read-class
         # project tools and MockModel's 'status of <project>'
         # pattern. One instance per store, shared with the
@@ -199,11 +210,30 @@ class Agent:
         return out
 
     # ---- task creation ---------------------------------------------------
-    def create_task(self, goal: str, title: str | None = None) -> dict:
+    def create_task(self, goal: str, title: str | None = None,
+                    profile: str | None = None) -> dict:
+        # Per-task provider override (v0.10.0): the name must be a
+        # profile the registry holds AND one that can serve. An
+        # unknown or unconfigured name is an honest creation
+        # error (ValueError — the API surfaces it as a 400),
+        # never a silent substitution.
+        if profile is not None:
+            entry = self.providers.get(profile)
+            if entry is None:
+                known = ", ".join(sorted(self.providers.profiles)) \
+                    or "(none)"
+                raise ValueError(
+                    f"unknown provider profile: {profile} "
+                    f"(profiles in providers.json: {known})")
+            if not self.providers.configured(entry):
+                raise ValueError(
+                    f"provider profile is not configured: {profile} "
+                    f"({entry.get('api_key_env')} is not set)")
         # The task's first next-step call. This is the ONLY call
         # that may fall back to MockModel (Router policy); its
         # outcome fixes the task's brain for its whole life.
-        first = self.router.next_step(goal, [], brain=None)
+        first = self.router.next_step(goal, [], brain=None,
+                                      provider=profile)
         steps = []
         if first["step"] is not None:
             steps.append(self._step_record(first["step"]))
@@ -215,6 +245,11 @@ class Agent:
             "steps": steps,
             "current_step": 0,
             "model": first["model"],
+            # The provider that owns this task (v0.10.0): a
+            # profile name, "env" for the legacy env adapter, or
+            # "mock" when MockModel owns it.
+            "provider": first.get("provider")
+                        or ("mock" if first["model"] == "mock" else "env"),
             "fallback_reason": first["fallback_reason"],
             "skill_id": None,
             "error": None,
@@ -525,7 +560,8 @@ class Agent:
             try:
                 nxt = self.router.next_step(task["goal"],
                                             self._history(task),
-                                            brain=task.get("model"))
+                                            brain=task.get("model"),
+                                            provider=task.get("provider"))
             except ModelError as exc:
                 # Mid-task provider failure: fail honestly. The
                 # brain never changes mid-task.
