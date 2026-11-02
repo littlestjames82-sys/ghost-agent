@@ -13,7 +13,7 @@ PYTHONPATH=src python3 -m ghost_agent demo
 PYTHONPATH=src python3 -m ghost_agent serve   # http://127.0.0.1:8770/
 ```
 
-**Local first, fail-closed auth (v2).** The dashboard binds
+**Local first, fail-closed auth (v2, kept in v3).** The dashboard binds
 `127.0.0.1` by default; on loopback it needs no token and the warning
 banner says so. If you bind it to a non-loopback host, it **refuses to
 start** unless `GHOST_AGENT_DASHBOARD_TOKEN` is set — and whenever a
@@ -36,7 +36,7 @@ needed), or `pip install .` for the `ghost-agent` command.
 # including one approval step (the demo approves it, as a human would).
 PYTHONPATH=src python3 -m ghost_agent demo
 
-# Dashboard v2 (sidebar UI: overview, board, approvals, tasks,
+# Dashboard v3 (sidebar UI: overview, board, approvals, tasks,
 # memory, skills, analytics, logs, system):
 PYTHONPATH=src python3 -m ghost_agent serve [--host 127.0.0.1] [--port 8770]
 
@@ -75,26 +75,43 @@ is the only place tools may touch.
 * **Memory** — candidate → approve/reject. Nothing enters trusted
   memory without approval. Trusted memory is searchable, and a trusted
   memory can be superseded (the old record is kept, marked).
-* **Dashboard (v2)** — single stdlib-served page (no build step),
+* **Dashboard (v3)** — single stdlib-served page (no build step),
   Ghost violet dark theme, left sidebar (collapses to a top bar on
-  phones), one page at a time with the URL hash following it,
-  auto-refresh every 5 seconds. Pages: **Overview** (stat cards,
-  recent tasks, needs-attention), **Board** (kanban Running /
-  Waiting approval / Done / Failed with status badges), **Approvals**
-  (queue with tool + args preview, approve/deny), **Tasks** (list +
-  detail with per-step badges and a trail search box), **Memory**
-  (candidates with approve/reject, trusted with source + verified),
-  **Skills** (candidate/trusted cards, promote button), **Analytics**
-  (honest counts from tasks + trail: by status, by model, steps,
-  approvals, events by type; token/cost is explicitly "not tracked
-  yet" because v1/v2 tasks do not record it), **Logs** (live trail
-  tail, type filter, severity colors), **System** (version, home,
-  workspace, model adapter, API-key *presence* only, auth mode).
-  APIs (v1 set unchanged, plus): `GET /api/overview`,
-  `GET /api/analytics`, `GET /api/system`,
-  `GET /api/trail?q=&type=&task_id=&limit=` (filtered, newest first),
-  `POST /api/memory/{id}/approve`, `POST /api/memory/{id}/reject`,
-  `POST /api/skills/{id}/promote`.
+  phones) with live count badges (pending approvals, running tasks,
+  memory candidates), one page at a time with the URL hash following
+  it, auto-refresh every 5 seconds. Every page has a description and
+  an empty state; actions report back inline, and deny/reject asks
+  for confirmation first. Pages: **Overview** (stat cards that link
+  to their pages, 14-day activity chart from real trail timestamps,
+  quick-start task templates, recent tasks with step progress,
+  needs-attention), **Board** (kanban Running / Waiting approval /
+  Done / Failed with column counts, model + step progress + created
+  time on cards, text filter), **Approvals** (pending queue with
+  labeled args rows and expandable long values, plus a Recent
+  decisions history), **Tasks** (status filter chips + search,
+  detail with per-step result/error output, a chronological trail
+  timeline, and the trail search box), **Memory** (an Add-a-memory
+  form that proposes a *candidate only*, search, candidates with
+  approve/reject, trusted with source + verified badge + dates),
+  **Skills** (filter chips + search, step timeline per skill,
+  permissions as badges, source task title, promote button),
+  **Analytics** (honest counts from tasks + trail: status donut,
+  approval outcome ratio, by model, steps, events by type with
+  percentages, the same 14-day activity chart; token/cost is
+  explicitly "not tracked yet" because tasks do not record it),
+  **Logs** (live trail tail, type + severity filters, match count,
+  search highlighting, pause/resume, download filtered events as
+  JSON), **System** (version, home, workspace, model adapter,
+  API-key *presence* only, auth mode, a health block, an auth
+  posture checklist, and copyable serve commands).
+  APIs (v1/v2 sets unchanged, plus): `GET /api/approvals` (all
+  approvals enriched with task titles, newest first),
+  `POST /api/memory/propose` `{text, source?}` (creates a candidate
+  only; empty text → 400), `GET /api/overview` and
+  `GET /api/analytics` now include `activity_by_day`, and
+  `GET /api/system` includes a `health` block (python version,
+  store/workspace existence + writability probe, task and trail
+  totals, server time).
 
 ## Models
 
@@ -135,9 +152,11 @@ is the only place tools may touch.
 ```sh
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate.py -v      # v1 known-answer gate first
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v2.py -v   # v2 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v3.py -v   # v3 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
-See [BUILD_REPORT.md](BUILD_REPORT.md) (v1) and
-[BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2) for gate results and
+See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
+[BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2), and
+[BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3) for gate results and
 counts.
