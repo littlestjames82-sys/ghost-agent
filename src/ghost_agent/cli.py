@@ -79,8 +79,12 @@ def cmd_skills(args) -> int:
 
 
 def cmd_serve(args) -> int:
-    from .server import serve
-    return serve(args.host, args.port)
+    from .server import DashboardConfigError, serve
+    try:
+        return serve(args.host, args.port)
+    except DashboardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:

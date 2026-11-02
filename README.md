@@ -13,10 +13,15 @@ PYTHONPATH=src python3 -m ghost_agent demo
 PYTHONPATH=src python3 -m ghost_agent serve   # http://127.0.0.1:8770/
 ```
 
-**Local only. No authentication.** The dashboard server binds
-`127.0.0.1` by default and says so in the UI and on start. Anyone who
-can reach this port can approve agent actions on this machine, so do
-not expose it beyond your own machine.
+**Local first, fail-closed auth (v2).** The dashboard binds
+`127.0.0.1` by default; on loopback it needs no token and the warning
+banner says so. If you bind it to a non-loopback host, it **refuses to
+start** unless `GHOST_AGENT_DASHBOARD_TOKEN` is set — and whenever a
+token is set, every `/api/*` call must carry it (`X-Ghost-Token`
+header or the cookie set by the page's token form). The token is never
+stored or logged. Anyone who can use this dashboard can approve agent
+actions on this machine, so keep it on loopback or on a trusted
+network behind the token.
 
 By Ghost Developer Studio. MIT licensed. **Zero dependencies**
 (Python standard library only), no telemetry, $0 to run.
@@ -31,8 +36,12 @@ needed), or `pip install .` for the `ghost-agent` command.
 # including one approval step (the demo approves it, as a human would).
 PYTHONPATH=src python3 -m ghost_agent demo
 
-# Dashboard (kanban board, approvals queue, memory, skills):
+# Dashboard v2 (sidebar UI: overview, board, approvals, tasks,
+# memory, skills, analytics, logs, system):
 PYTHONPATH=src python3 -m ghost_agent serve [--host 127.0.0.1] [--port 8770]
+
+# Non-loopback bind (refused unless the token is set):
+GHOST_AGENT_DASHBOARD_TOKEN=... PYTHONPATH=src python3 -m ghost_agent serve --host 0.0.0.0
 
 # CLI:
 PYTHONPATH=src python3 -m ghost_agent tasks
@@ -66,13 +75,26 @@ is the only place tools may touch.
 * **Memory** — candidate → approve/reject. Nothing enters trusted
   memory without approval. Trusted memory is searchable, and a trusted
   memory can be superseded (the old record is kept, marked).
-* **Dashboard** — phone-friendly single page, Ghost violet accent,
-  kanban columns Running / Waiting approval / Done / Failed, task
-  detail + trail, approvals queue with approve/deny buttons, memory
-  and skills views. APIs: `GET /api/board`, `POST /api/tasks`,
-  `POST /api/tasks/{id}/approve`, `POST /api/tasks/{id}/deny`,
-  `GET /api/tasks/{id}`, `GET /api/memory`, `GET /api/skills`,
-  `GET /api/trail`.
+* **Dashboard (v2)** — single stdlib-served page (no build step),
+  Ghost violet dark theme, left sidebar (collapses to a top bar on
+  phones), one page at a time with the URL hash following it,
+  auto-refresh every 5 seconds. Pages: **Overview** (stat cards,
+  recent tasks, needs-attention), **Board** (kanban Running /
+  Waiting approval / Done / Failed with status badges), **Approvals**
+  (queue with tool + args preview, approve/deny), **Tasks** (list +
+  detail with per-step badges and a trail search box), **Memory**
+  (candidates with approve/reject, trusted with source + verified),
+  **Skills** (candidate/trusted cards, promote button), **Analytics**
+  (honest counts from tasks + trail: by status, by model, steps,
+  approvals, events by type; token/cost is explicitly "not tracked
+  yet" because v1/v2 tasks do not record it), **Logs** (live trail
+  tail, type filter, severity colors), **System** (version, home,
+  workspace, model adapter, API-key *presence* only, auth mode).
+  APIs (v1 set unchanged, plus): `GET /api/overview`,
+  `GET /api/analytics`, `GET /api/system`,
+  `GET /api/trail?q=&type=&task_id=&limit=` (filtered, newest first),
+  `POST /api/memory/{id}/approve`, `POST /api/memory/{id}/reject`,
+  `POST /api/skills/{id}/promote`.
 
 ## Models
 
@@ -98,8 +120,10 @@ is the only place tools may touch.
 
 * MockModel is deterministic, not intelligent. Real planning quality
   needs a real model, with your own key, via the env vars above.
-* Localhost only, no authentication — by design for v1, and a real
-  limit: never expose the dashboard port.
+* Dashboard auth is one shared token, not user accounts. Loopback
+  needs no token (v1 posture, banner says so); non-loopback binds
+  fail closed without `GHOST_AGENT_DASHBOARD_TOKEN`. Still: never
+  expose the dashboard to the public internet.
 * The `shell` tool runs real commands inside the workspace after
   approval. Approval is the gate; there is no container sandbox.
 * One task runs its steps sequentially in-process; approvals pause a
@@ -109,8 +133,11 @@ is the only place tools may touch.
 ## Tests
 
 ```sh
-PYTHONPATH=src python3 -m pytest tests/test_sanity_gate.py -v   # known-answer gate first
-PYTHONPATH=src python3 -m pytest tests/ -q                      # full suite
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate.py -v      # v1 known-answer gate first
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v2.py -v   # v2 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
-See [BUILD_REPORT.md](BUILD_REPORT.md) for the gate results and counts.
+See [BUILD_REPORT.md](BUILD_REPORT.md) (v1) and
+[BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2) for gate results and
+counts.
