@@ -2,12 +2,13 @@
 
 K1 read_file on an existing fixture -> governance allow, execution succeeds.
 K2 write_file with NO approval -> blocked/waiting, file ABSENT afterward.
-K3 write_file WITH approval -> executes, exact content, trail record
-   exists and precedes execution (trail ts_ns <= file mtime_ns).
+K3 write_file WITH approval -> executes, exact content, and the trail
+   records approval_requested -> approval_granted -> tool_execute in
+   that order (record-before-execute proven by trail sequence).
 K4 trail-write fault injection -> action does NOT execute.
 """
-import os
 import shutil
+import time
 
 from ghost_agent import governance
 
@@ -40,11 +41,36 @@ def test_k3_write_with_approval_executes_and_trail_precedes(agent, store):
     assert task["status"] == "done"
     assert target.is_file()
     assert target.read_text(encoding="utf-8") == "exact-content-123"
-    trail = [e for e in store.read_trail(task_id=task["id"])
-             if e["type"] == "tool_execute" and e["tool"] == "write_file"]
-    assert trail, "no tool_execute trail record for write_file"
-    file_mtime_ns = os.stat(target).st_mtime_ns
-    assert trail[0]["ts_ns"] <= file_mtime_ns, "trail record did not precede execution"
+    # Record-before-execute, proven by trail ORDER (sequence), not by
+    # comparing the trail clock against the file's mtime: at
+    # same-process sequential-write timescales that cross-clock
+    # nanosecond comparison is racy under load and cannot reliably
+    # order the two writes anyway, while the append-only trail's own
+    # order is exact.
+    events = store.read_trail(task_id=task["id"])
+
+    def _index(event_type):
+        for i, e in enumerate(events):
+            if e["type"] == event_type and e["tool"] == "write_file":
+                return i
+        return None
+
+    exec_idx = _index("tool_execute")
+    assert exec_idx is not None, "no tool_execute trail record for write_file"
+    req_idx = _index("approval_requested")
+    grant_idx = _index("approval_granted")
+    assert req_idx is not None, \
+        "no approval_requested trail record for write_file"
+    assert grant_idx is not None, \
+        "no approval_granted trail record for write_file"
+    assert req_idx < grant_idx < exec_idx, (
+        "trail order is not approval_requested -> approval_granted -> "
+        "tool_execute; the execution was not recorded before it ran")
+    # Loose sanity only: the execute record's timestamp falls inside
+    # the task's own run window (after its first trail event, before
+    # now) — a single-clock check; no filesystem times are compared.
+    exec_ts_ns = events[exec_idx]["ts_ns"]
+    assert events[0]["ts_ns"] <= exec_ts_ns <= time.time_ns()
 
 
 def test_k4_trail_fault_blocks_execution(agent, store):

@@ -40,10 +40,10 @@ def test_v5_version_in_export(tmp_path):
     try:
         status, _, body = _get(base, "/api/export")
         assert status == 200
-        assert json.loads(body)["version"] == "0.11.0"
+        assert json.loads(body)["version"] == "0.11.1"
         status, _, body = _get(base, "/api/system")
         assert status == 200
-        assert json.loads(body)["version"] == "0.11.0"
+        assert json.loads(body)["version"] == "0.11.1"
     finally:
         server.shutdown(); server.server_close()
 
