@@ -41,6 +41,10 @@ MODEL_PRICING_USD_PER_MILLION = {
     "gpt-4o": (2.50, 10.00),
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1": (2.00, 8.00),
+    # Meta's published Muse Spark rates (connector doc, Oct 26,
+    # 2026): $1.25 input / $4.25 output per million. The prefix
+    # covers muse-spark-1.3 and its contributor variants.
+    "muse-spark": (1.25, 4.25),
 }
 
 
@@ -192,6 +196,19 @@ class MockModel:
                           "verify": {"type": "ok"}})
         return steps
 
+    def next_step(self, goal: str, history: list[dict]) -> dict | None:
+        """Plan-act-observe interface (v0.7.0): serve the existing
+        deterministic full plan one step at a time, indexed by how
+        many steps history says already ran. Returns None when the
+        plan is exhausted (the loop's 'done'). Same steps, same
+        order, same outcomes as plan() — just drip-fed."""
+        steps = self.plan(goal)
+        idx = len(history or [])
+        if idx >= len(steps):
+            return None
+        step = steps[idx]
+        return dict(step, args=dict(step.get("args") or {}))
+
 
 PLANNER_GUIDANCE = (
     "Planning rules: "
@@ -205,6 +222,22 @@ PLANNER_GUIDANCE = (
     "(3) Order steps so every read of a source file comes before any "
     "write that depends on its content."
 )
+
+
+# Exact argument signatures, taught verbatim in every planner
+# prompt. The live 10-goal gauntlet on v0.6.0 (Nov 2, 2026) lost
+# 3 of 10 goals to one bug: the model proposed search_files with a
+# wrong argument name and the task died on "missing args for
+# search_files: ['query']" — the prompt had never named the args.
+TOOL_SIGNATURES = (
+    "Tools and their exact args (use exactly these names): "
+    "read_file{path}, list_dir{path}, echo_note{text}, "
+    "search_files{query, path?}, write_file{path, content}, "
+    "append_file{path, content}, shell{command}."
+)
+
+TOOL_NAMES = ("read_file,list_dir,echo_note,search_files,"
+              "write_file,append_file,shell")
 
 
 def build_planner_prompt(goal: str) -> str:
@@ -221,7 +254,50 @@ def build_planner_prompt(goal: str) -> str:
         "Each step: {\"tool\": one of "
         "read_file,list_dir,echo_note,search_files,write_file,append_file,shell, "
         "\"args\": {...}, \"verify\": {\"type\": \"ok\"}}. "
+        + TOOL_SIGNATURES + " "
         + PLANNER_GUIDANCE + " Goal: " + goal
+    )
+
+
+def format_history(history: list[dict]) -> str:
+    """Render completed steps (with their observed outputs) for a
+    next-step prompt. This is the 'observe' in plan-act-observe:
+    the model plans the next step with earlier outputs in view."""
+    if not history:
+        return "Steps completed so far: none."
+    lines = ["Steps completed so far:"]
+    for i, h in enumerate(history, start=1):
+        try:
+            args_txt = json.dumps(h.get("args") or {})
+        except (TypeError, ValueError):
+            args_txt = str(h.get("args"))
+        lines.append(f"{i}. {h.get('tool')} {args_txt} -> {h.get('status')}")
+        output = (h.get("output") or "").strip()
+        if output:
+            lines.append(f"   output: {output}")
+    return "\n".join(lines)
+
+
+def build_next_step_prompt(goal: str, history: list[dict]) -> str:
+    """The plan-act-observe prompt (v0.7.0): one step at a time,
+    with the history of what already ran and what it produced."""
+    return (
+        "You are planning a task one step at a time. Reply with "
+        "ONLY a JSON object for the NEXT step: {\"tool\": one of "
+        + TOOL_NAMES + ", \"args\": {...}, \"verify\": {\"type\": \"ok\"}} "
+        "— or {\"tool\": \"done\"} when the goal is fully achieved "
+        "and nothing remains to do. "
+        + TOOL_SIGNATURES + " "
+        + PLANNER_GUIDANCE + " "
+        "Work efficiently: do not re-read a file whose output "
+        "already appears in the history unless you need a specific "
+        "part that was cut off. Keep track of the facts you have "
+        "gathered as you go. As soon as the goal's deliverable "
+        "exists (for example the requested file has been written), "
+        "answer {\"tool\": \"done\"} immediately instead of doing "
+        "more verification reads. "
+        "Goal: " + goal + "\n"
+        + format_history(history)
     )
 
 
@@ -234,6 +310,9 @@ class OpenAICompatibleModel:
                          or "https://api.openai.com/v1").rstrip("/")
         self.model = model or os.environ.get("GHOST_AGENT_MODEL") or "gpt-4o-mini"
         self.last_usage: dict | None = None
+        # Legacy full-plan answers to a next-step request, keyed by
+        # goal and served stepwise by history index (see next_step).
+        self._plan_cache: dict[str, list[dict]] = {}
 
     def plan(self, goal: str) -> list[dict]:
         self.last_usage = None
@@ -251,12 +330,14 @@ class OpenAICompatibleModel:
                      "Authorization": "Bearer " + key},  # key used in-memory only
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=90) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ModelError(f"provider request failed: {type(exc).__name__}") from exc
         try:
             content = payload["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise ModelError("provider returned an empty response")
             start, end = content.index("["), content.rindex("]") + 1
             steps = json.loads(content[start:end])
             if not isinstance(steps, list) or not steps:
@@ -272,6 +353,104 @@ class OpenAICompatibleModel:
             return steps
         except (KeyError, IndexError, ValueError) as exc:
             raise ModelError(f"provider returned an unusable plan: {type(exc).__name__}") from exc
+
+    # ---- plan-act-observe (v0.7.0) ------------------------------------
+    def _post(self, prompt: str) -> dict:
+        """One chat/completions round trip. Raises ModelError on
+        transport failure; records last_usage on success."""
+        key = os.environ.get("GHOST_AGENT_API_KEY")
+        if not key:
+            raise ModelError("GHOST_AGENT_API_KEY is not set")
+        body = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + "/chat/completions", data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + key},  # key used in-memory only
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise ModelError(f"provider request failed: {type(exc).__name__}") from exc
+        self.last_usage = usage_record(
+            payload.get("model") or self.model, "provider",
+            payload.get("usage"), adapter=self.name)
+        return payload
+
+    @staticmethod
+    def _normalize_step(step) -> dict:
+        if not isinstance(step, dict) or "tool" not in step:
+            raise ValueError("bad step")
+        step = dict(step)
+        step.setdefault("args", {})
+        step.setdefault("verify", {"type": "ok"})
+        return step
+
+    def _serve_cached(self, goal: str, history: list[dict]) -> dict | None:
+        """Serve a buffered full-plan answer by history index.
+        Returns the step, or None when the buffered plan is
+        exhausted (done). Cache hits make NO network call and
+        record NO usage — the usage was recorded when the plan
+        was fetched."""
+        steps = self._plan_cache.get(goal)
+        if steps is None:
+            return None
+        idx = len(history or [])
+        if idx >= len(steps):
+            del self._plan_cache[goal]
+            return None
+        return self._normalize_step(steps[idx])
+
+    def next_step(self, goal: str, history: list[dict]) -> dict | None:
+        """Ask the provider for the NEXT step given the history of
+        completed steps and their outputs. Returns one step dict,
+        or None when the provider answers {"tool": "done"} (or a
+        buffered plan runs out). Raises ModelError on failure.
+
+        A provider that ignores the one-step instruction and
+        answers with a full JSON array (the pre-v0.7.0 plan shape)
+        is handled too: the array is buffered under the goal and
+        served stepwise by history index, so its usage is recorded
+        exactly once, when it was fetched.
+        """
+        self.last_usage = None
+        if goal in self._plan_cache:
+            return self._serve_cached(goal, history)
+        payload = self._post(build_next_step_prompt(goal, history))
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelError(
+                f"provider returned an unusable step: {type(exc).__name__}") from exc
+        if not isinstance(content, str) or not content.strip():
+            # Live-found (v0.7.0 gauntlet, goal 10): Spark can answer
+            # with a null message content. That is a provider failure
+            # to record honestly, never an AttributeError crash.
+            raise ModelError("provider returned an empty response")
+        i_obj = content.find("{")
+        i_arr = content.find("[")
+        try:
+            if i_arr != -1 and (i_obj == -1 or i_arr < i_obj):
+                # Legacy full-plan shape: buffer and serve stepwise.
+                raw = json.loads(content[i_arr:content.rindex("]") + 1])
+                if not isinstance(raw, list) or not raw:
+                    raise ValueError("empty plan")
+                steps = [self._normalize_step(s) for s in raw]
+                self._plan_cache[goal] = steps
+                return self._serve_cached(goal, history)
+            if i_obj == -1:
+                raise ValueError("no step object")
+            step, _ = json.JSONDecoder().raw_decode(content[i_obj:])
+            step = self._normalize_step(step)
+        except ValueError as exc:
+            raise ModelError(
+                f"provider returned an unusable step: {type(exc).__name__}") from exc
+        if step.get("tool") == "done":
+            return None
+        return step
 
 
 class Router:
@@ -300,3 +479,69 @@ class Router:
                         "usage": self.mock.last_usage}
         return {"steps": self.mock.plan(goal), "model": self.mock.name,
                 "fallback_reason": None, "usage": self.mock.last_usage}
+
+    # ---- plan-act-observe (v0.7.0) ------------------------------------
+    def _real_next_step(self, goal: str, history: list[dict]) -> dict | None:
+        """One next-step call against the real adapter. Adapters
+        that only implement the legacy full-plan interface are
+        served stepwise from their plan by history index (their
+        own ModelError still propagates verbatim)."""
+        nxt = getattr(self.real, "next_step", None)
+        if nxt is not None:
+            return nxt(goal, history)
+        steps = self.real.plan(goal)
+        idx = len(history or [])
+        if idx >= len(steps):
+            return None
+        step = steps[idx]
+        return dict(step, args=dict(step.get("args") or {}))
+
+    def _real_result(self, step: dict | None) -> dict:
+        return {"step": step, "done": step is None,
+                "model": self.real.name,
+                "usage": getattr(self.real, "last_usage", None),
+                "fallback_reason": None}
+
+    def _mock_result(self, step: dict | None,
+                     fallback_reason: str | None = None) -> dict:
+        return {"step": step, "done": step is None,
+                "model": self.mock.name,
+                "usage": self.mock.last_usage,
+                "fallback_reason": fallback_reason}
+
+    def next_step(self, goal: str, history: list[dict],
+                  brain: str | None = None) -> dict:
+        """One plan-act-observe call. Returns {step, done, model,
+        usage, fallback_reason}; step is None when the model is
+        done.
+
+        Fallback honesty: with brain=None (a task's FIRST call) a
+        provider failure falls back to MockModel for the whole
+        task, exactly as plan() always did, with the reason
+        reported. Once a task has a brain (its recorded model
+        name), calls go to that brain only — a provider failure
+        raises ModelError so the agent can fail the task honestly
+        instead of silently switching brains mid-task.
+        """
+        if brain is None:
+            if self.real is not None:
+                try:
+                    return self._real_result(
+                        self._real_next_step(goal, history))
+                except ModelError as exc:
+                    return self._mock_result(
+                        self.mock.next_step(goal, history),
+                        fallback_reason=str(exc))
+            return self._mock_result(self.mock.next_step(goal, history))
+        if brain == self.mock.name:
+            return self._mock_result(self.mock.next_step(goal, history))
+        # The task's brain is the real provider. If this process
+        # built its Router without one (e.g. a CLI approve in an
+        # env with no key), construct the adapter now — it reads
+        # the key at call time and raises ModelError if unset, so
+        # the failure stays honest and attributed.
+        if self.real is None:
+            self.real = OpenAICompatibleModel()
+        if brain != self.real.name:
+            raise ModelError(f"unknown brain for task: {brain}")
+        return self._real_result(self._real_next_step(goal, history))

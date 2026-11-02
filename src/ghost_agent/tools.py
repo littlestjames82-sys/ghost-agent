@@ -25,6 +25,31 @@ def tool_kind(name: str) -> str | None:
     return TOOL_KINDS.get(name)
 
 
+def validate_args(name: str, args) -> str | None:
+    """Check a proposed step's args against the tool's signature.
+
+    Returns an error string (same wording the dispatcher raises,
+    e.g. "missing args for search_files: ['query']") or None when
+    the args are executable. Unknown tools return None here on
+    purpose: they are governance's deny-by-default path, not an
+    argument problem. Used by the agent loop (v0.7.0) to feed
+    validation errors back to the model instead of dying on them.
+    """
+    if name not in TOOL_KINDS:
+        return None
+    if not isinstance(args, dict):
+        return f"args for {name} must be an object"
+    import inspect
+    fn = getattr(Tools, name)
+    params = inspect.signature(fn).parameters
+    missing = [k for k, p in params.items()
+               if k != "self" and p.default is inspect.Parameter.empty
+               and k not in args]
+    if missing:
+        return f"missing args for {name}: {missing}"
+    return None
+
+
 class ToolError(Exception):
     pass
 

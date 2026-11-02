@@ -77,11 +77,17 @@ is the only place tools may touch.
   files skipped), `write_file`, `append_file` (write — raw append,
   approval-gated exactly like a write), `shell` (exec, timed out
   and exit-code captured). Paths escaping the sandbox are refused.
-* **Agent loop** — plan, then per step: governance check, approval if
-  needed, **record trail**, execute, verify (file exists / exact
-  content / exit 0). A fully successful run proposes a candidate skill
-  (name, steps, tools, permissions) that stays **untrusted** until a
-  human promotes it.
+* **Agent loop** — since v0.7.0 the loop is **plan-act-observe**:
+  the model is asked for one step at a time, with the completed
+  steps and their actual outputs in context, so a step can be
+  planned from what earlier steps really found. Per step:
+  governance check, approval if needed, **record trail**, execute,
+  verify (file exists / exact content / exit 0), then ask again —
+  until the model answers `done`. See "Plan-act-observe loop
+  (v0.7.0)" below for the guards (step cap, loop detection,
+  validation feedback, fallback honesty). A fully successful run
+  proposes a candidate skill (name, steps, tools, permissions)
+  that stays **untrusted** until a human promotes it.
 * **Memory** — candidate → approve/reject. Nothing enters trusted
   memory without approval. Trusted memory is searchable, and a trusted
   memory can be superseded (the old record is kept, marked).
@@ -213,6 +219,56 @@ is the only place tools may touch.
   purely mechanical operations), and to order reads of source files
   before any write that depends on them.
 
+## Plan-act-observe loop (v0.7.0)
+
+* **One step at a time, with the evidence in view.** v0.6.0 planned
+  a whole task in a single model call, so a write step's content
+  was composed *before* its read steps ran — summaries came out
+  generic and ungrounded. Now the model is asked for the NEXT step
+  given the goal plus the history: every completed step with its
+  tool, args, status, and observed output (each output truncated
+  to 1,000 chars; the history is capped at ~8,000 chars, oldest
+  dropped first). It answers one step object — or `{"tool":
+  "done"}`. The task's step list grows as the loop runs, and every
+  next-step request writes a `replan` trail event with its
+  iteration number, so the loop is fully auditable in Logs.
+  Providers that still answer with a full plan array are served
+  stepwise from that array, with usage recorded once, when it was
+  fetched.
+* **Per-call usage.** Every model call in the loop records its own
+  `model_usage` event and accumulates into the task's totals, so
+  `calls` now exceeds 1 for real tasks — that is the loop working,
+  not double-counting.
+* **Guards.** At most **12 executed steps** per task ("step cap
+  reached"). If the model proposes the identical step (tool +
+  args) as the last executed step twice in a row, the task fails
+  with "loop detected" instead of burning calls. Governance is
+  unchanged and per step: a write/exec proposal is recorded and
+  pauses the task in `waiting_approval` *before* executing, no
+  model call happens while a task waits, and approval resumes the
+  loop exactly where it stopped.
+* **Validation feedback.** Both planner prompts now teach each
+  tool's **exact argument signature** (`search_files{query,
+  path?}`, `write_file{path, content}`, …). And if a proposed step
+  still arrives with unusable args, the loop no longer dies on it
+  (the v0.6.0 gauntlet lost 3 of 10 goals to exactly that): the
+  step is parked as `rejected`, the validation error is fed back
+  in the history, and the model gets to propose a corrected step —
+  at most **2 correction retries per task**, after which the task
+  fails honestly with the validation error in the trail.
+* **Fallback honesty.** Only a task's FIRST model call may fall
+  back to MockModel (the reason is recorded, as always). If a
+  later call fails, the task **fails** with the provider's reason
+  in the trail — the brain never silently changes mid-task, and
+  the task's `model` field always names the brain in charge.
+  MockModel serves its deterministic plans through the same
+  next-step interface, one step at a time, so its tasks behave
+  exactly as before.
+* **muse-spark pricing.** The built-in price table now includes
+  the muse-spark family at Meta's published $1.25 input / $4.25
+  output per million tokens, so Muse Spark runs report an
+  estimated cost instead of "unknown".
+
 ## Models
 
 * **MockModel (default in tests/demo)** — a deterministic, rule-based
@@ -234,8 +290,10 @@ is the only place tools may touch.
   ```
 
   The key is read from the environment at call time only. If the
-  provider fails, the router falls back to MockModel and records the
-  fallback reason in the trail.
+  provider fails on a task's FIRST planning call, the router falls
+  back to MockModel for that whole task and records the fallback
+  reason in the trail; a failure on any later call fails the task
+  instead (see the v0.7.0 loop section above).
 
 ## Honest limits
 
@@ -264,6 +322,7 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v3.py -v   # v3 known-an
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v4.py -v   # v4 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v5.py -v   # v5 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v6.py -v   # v6 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v7.py -v   # v7 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
@@ -271,8 +330,9 @@ See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2),
 [BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3),
 [BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4),
-[BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5), and
-[BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6) for gate results and
+[BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5),
+[BUILD_REPORT_V6.md](BUILD_REPORT_V6.md) (v6), and
+[BUILD_REPORT_V7.md](BUILD_REPORT_V7.md) (v7) for gate results and
 counts.
 
 ## Design language (v0.5.0)
