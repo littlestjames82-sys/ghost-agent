@@ -1,4 +1,4 @@
-"""Dashboard server v4: stdlib http.server, binds 127.0.0.1 by default.
+"""Dashboard server v5: stdlib http.server, binds 127.0.0.1 by default.
 
 Sidebar SPA in the Ghost violet dark theme — a single stdlib-served
 page, no build step. v3 improves every page: descriptions and empty
@@ -21,6 +21,19 @@ Ctrl/Cmd+K command palette, bulk approvals (POST
 (GET /api/export, attachment download), and a Comfortable/Compact
 density toggle persisted in localStorage.
 
+v5 is a pure reskin in the Trust Ladder design language (Ryan's
+pick): deep-navy palette, ghost-mark brand header, grouped sidebar
+(Operate / Intelligence / System), content grouped into color-coded
+"shelves" (solid green = trusted/done, dashed amber =
+candidate/waiting, solid violet = active, muted = neutral, red =
+failed), ranked cards with icon tiles and provenance strips, an
+All Apps drawer, and a phone bottom navigation (Home / Board /
+Agents / More) under 820px. No API, payload, or behavior changes.
+The brand mark is Ryan's Ghost Agent icon
+(assets/ghost-agent-icon.jpg, served token-free at
+/assets/ghost-agent-icon.jpg; the CSS "G" tile is the fallback when
+the file is absent).
+
 Auth (Hermes-style, fail-closed):
 - Loopback bind: no token needed (the v1 posture; warning banner).
 - Non-loopback bind: GHOST_AGENT_DASHBOARD_TOKEN MUST be set or the
@@ -39,6 +52,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
@@ -52,6 +66,22 @@ WARNING = "LOCAL ONLY - NO AUTHENTICATION - do not expose beyond this machine"
 WARNING_TOKEN = ("TOKEN AUTHENTICATION ENABLED - still do not expose "
                  "beyond trusted networks")
 TOKEN_ENV = "GHOST_AGENT_DASHBOARD_TOKEN"
+
+# Ryan's Ghost Agent icon (repo-root assets/, added v0.5.0). The source
+# file arrived as JPEG data under a .png name; it is stored and served
+# as .jpg. Resolved from this file's location so it works from any cwd.
+ICON_PATH = (Path(__file__).resolve().parents[2]
+             / "assets" / "ghost-agent-icon.jpg")
+
+
+def _brandmark_html() -> str:
+    """Brand mark for the sidebar header, drawer, and login box: the
+    icon image when the asset file is present, the CSS 'G' tile
+    otherwise, so a missing asset never shows a broken image."""
+    if ICON_PATH.exists():
+        return ('<img class="brandicon" src="/assets/ghost-agent-icon.jpg" '
+                'alt="Ghost Agent">')
+    return '<span class="ghostmark">G</span>'
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
 
 
@@ -372,18 +402,30 @@ def decide_all(store: Store, agent: Agent, decision: str) -> dict:
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/jpeg" href="/assets/ghost-agent-icon.jpg">
 <title>Ghost Agent</title>
 <style>
-:root{--bg:#0d0b14;--panel:#181325;--card:#221a38;--card2:#281e47;--violet:#6716f3;
---violet2:#8b5cf6;--text:#eee;--muted:#a49fc0;--line:#352a55;
---amber:#f5b93f;--green:#3ecf6f;--red:#f26d6d;--blue:#5ea8ff}
+:root{--bg:#07030f;--panel:#120b24;--panel2:#0d0820;--card:#17102c;--card2:#1f1740;--violet:#6716f3;
+--violet2:#a678ff;--violetlt:#b18cff;--text:#f1edff;--muted:#a49bd0;--line:#2b2149;
+--amber:#ffb43a;--amberbg:#2a1e05;--green:#3ecf6e;--greenline:#2f9e57;--red:#ff5c5c;--redlt:#ff7b7b;--blue:#5ea8ff}
 *{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:var(--bg);color:var(--text)}
 .layout{display:flex;min-height:100vh}
-.sidebar{width:228px;flex:0 0 228px;background:#120e1f;border-right:1px solid var(--line);
-padding:16px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
-.brand{font-size:19px;font-weight:700;padding:2px 10px}
-.brandsub{font-size:11px;color:var(--muted);padding:0 10px 14px}
+.sidebar{width:232px;flex:0 0 232px;background:var(--panel2);border-right:1px solid var(--line);
+padding:16px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px;overflow:auto}
+.brandrow{display:flex;gap:10px;align-items:center;padding:2px 8px 2px}
+.ghostmark{flex:0 0 38px;width:38px;height:38px;border-radius:13px 13px 16px 16px;
+background:linear-gradient(135deg,var(--violet2),var(--violet));color:#fff;font-weight:900;
+font-size:19px;display:flex;align-items:center;justify-content:center}
+.brandicon{flex:0 0 38px;width:38px;height:38px;border-radius:11px;object-fit:cover;background:#000}
+.drawerbox .brandicon{flex-basis:26px;width:26px;height:26px;border-radius:8px}
+.drawerbox .ghostmark{flex-basis:26px;width:26px;height:26px;border-radius:8px;font-size:13px}
+#loginbox .brandicon{flex-basis:30px;width:30px;height:30px;border-radius:9px}
+#loginbox .ghostmark{flex-basis:30px;width:30px;height:30px;border-radius:9px;font-size:14px}
+.brand{font-size:16px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--violetlt)}
+.brandsub{font-size:10.5px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-top:2px}
+.navgroup{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;
+color:var(--muted);margin:15px 10px 4px}
 .navbtn{display:flex;justify-content:space-between;align-items:center;width:100%;text-align:left;
 background:transparent;color:var(--text);border:0;border-radius:8px;padding:10px 12px;
 font-size:14px;cursor:pointer}
@@ -394,19 +436,35 @@ font-weight:700;padding:1px 8px}
 .navcount.alt{background:#3a2f63;color:#cfc6ff}
 .sidefoot{margin-top:auto;font-size:11px;color:var(--muted);padding:8px 10px}
 .main{flex:1;min-width:0}
-.topbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--panel);
+.topbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--panel2);
 border-bottom:1px solid var(--line);padding:10px 18px;position:sticky;top:0;z-index:5}
-.topbar .t{font-size:15px;font-weight:600}
+.topbar .t{font-size:15px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:var(--violetlt)}
+.surface{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700}
 .pill{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:3px 10px;color:var(--muted)}
 .pill b{color:var(--text);font-weight:600}
-.warn{background:#3a2400;color:#ffcf6e;padding:9px 18px;font-size:13px;border-bottom:1px solid #5a3c00}
-.warn.token{background:#12283f;color:#9fd0ff;border-bottom-color:#1d4a73}
+.warn{background:#241a08;color:#ffcf6e;padding:9px 18px;font-size:13px;border-bottom:1px solid #6b5518}
+.warn.token{background:#0e2233;color:#9fd0ff;border-bottom-color:#1d4a73}
 content{display:block;padding:16px 18px;max-width:1180px;margin:0 auto}
 .page{display:none}
 .page.active{display:block}
 h2.ptitle{margin:4px 0 2px;font-size:20px}
 .pdesc{font-size:13px;color:var(--muted);margin:2px 0 4px}
 .seclabel{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:20px 0 8px}
+.shelf{border:1.5px solid var(--line);border-radius:18px;padding:14px;margin:16px 0;background:rgba(18,11,36,.45)}
+.shelf-green{border:1.5px solid var(--greenline)}
+.shelf-amber{border:1.5px dashed var(--amber)}
+.shelf-violet{border:1.5px solid var(--violet)}
+.shelf-red{border:1.5px solid #8a2f38;background:rgba(255,92,92,.04)}
+.shelf-h{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:0 0 10px}
+.shelf-h .sl{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;color:var(--text)}
+.shelf-green .shelf-h .sl{color:var(--green)}
+.shelf-amber .shelf-h .sl{color:var(--amber)}
+.shelf-violet .shelf-h .sl{color:var(--violetlt)}
+.shelf-red .shelf-h .sl{color:var(--redlt)}
+.shelf-pill{font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:999px;
+padding:2px 10px;color:var(--muted);white-space:nowrap}
+.shelf-amber .shelf-pill{border-color:#6b5518;color:var(--amber)}
+.shelf-green .shelf-pill{border-color:#1f5c33;color:var(--green)}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-top:12px}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
 .stat .num{font-size:24px;font-weight:700}
@@ -414,33 +472,53 @@ h2.ptitle{margin:4px 0 2px;font-size:20px}
 .statlink{cursor:pointer}
 .statlink:hover{border-color:var(--violet2)}
 .board{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:10px}
-.col{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;min-height:90px}
-.col h3{margin:2px 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
-.card{background:var(--card);border:1px solid transparent;border-radius:10px;padding:10px 12px;
+.board .shelf{margin:0}
+.col{min-height:90px}
+.card{background:var(--card);border:1px solid transparent;border-radius:12px;padding:11px 12px;
 margin:8px 0;font-size:14px;word-break:break-word}
 .card:hover{background:var(--card2);border-color:var(--line)}
 .card a{color:#c9b3ff;text-decoration:none}
+.cardhead{display:flex;gap:10px;align-items:flex-start}
+.cardmain{flex:1;min-width:0}
+.rank{flex:0 0 26px;width:26px;height:26px;border-radius:9px;background:var(--violet);color:#fff;
+font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center}
+.shelf-green .rank{background:#1f7a3d}
+.shelf-amber .rank{background:#8a5f00}
+.tile{flex:0 0 42px;width:42px;height:42px;border-radius:11px;background:#241647;color:var(--violetlt);
+font-weight:800;font-size:10.5px;letter-spacing:.03em;display:flex;align-items:center;justify-content:center;text-align:center}
+.shelf-green .tile{background:#12351f;color:var(--green)}
+.shelf-amber .tile{background:var(--amberbg);color:var(--amber)}
+.shelf-red .tile{background:#3d1216;color:var(--redlt)}
+.prov{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-top:10px;
+padding-top:9px;border-top:1px solid var(--line);font-size:11.5px}
+.prov .pl{display:block;font-size:9.5px;font-weight:700;letter-spacing:.12em;
+text-transform:uppercase;color:var(--muted);margin-bottom:1px}
+.shelf-green .prov .pl{color:var(--green)}
+.shelf-amber .prov .pl{color:var(--amber)}
+.shelf-violet .prov .pl{color:var(--violetlt)}
+.prov .pv{font-weight:600;word-break:break-word}
+.prov .arr{color:var(--violet2);font-weight:700;padding-top:8px}
 .badge{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px;
 vertical-align:1px;background:#33334d;color:#ddd}
-.b-running{background:#2c2a6e;color:#b9bcff}
-.b-waiting_approval{background:#4a3400;color:var(--amber)}
-.b-pending{background:#333344;color:#ccc}
-.b-done{background:#0f3d22;color:var(--green)}
-.b-failed{background:#4a1218;color:var(--red)}
-.b-candidate{background:#4a3400;color:var(--amber)}
-.b-trusted{background:#0f3d22;color:var(--green)}
-.b-approved{background:#0f3d22;color:var(--green)}
-.b-denied{background:#4a1218;color:var(--red)}
+.b-running{background:#2c2150;color:#c9b3ff}
+.b-waiting_approval{background:var(--amberbg);color:var(--amber)}
+.b-pending{background:#241d3d;color:#cfc8ee}
+.b-done{background:#0e3520;color:var(--green)}
+.b-failed{background:#3d1216;color:var(--redlt)}
+.b-candidate{background:var(--amberbg);color:var(--amber)}
+.b-trusted{background:#0e3520;color:var(--green)}
+.b-approved{background:#0e3520;color:var(--green)}
+.b-denied{background:#3d1216;color:var(--redlt)}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--violet2);
 margin-right:6px;animation:pulse 1.6s infinite}
 @keyframes pulse{0%{opacity:1}50%{opacity:.25}100%{opacity:1}}
 button{background:var(--violet);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
 button:hover{background:#7d33ff}
-button.deny{background:#7a1f2b}
+button.deny{background:#7a2430}
 button.ghostbtn{background:transparent;border:1px solid var(--line);color:var(--text)}
 button.small{padding:4px 10px;font-size:12px}
 input,select,textarea{box-sizing:border-box;padding:9px;border-radius:8px;border:1px solid var(--line);
-background:var(--panel);color:var(--text);font-size:14px}
+background:var(--panel2);color:var(--text);font-size:14px}
 input.wide{width:100%}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--panel);padding:10px;border-radius:8px;
 font-size:12px;border:1px solid var(--line)}
@@ -456,22 +534,22 @@ pre.stepout{color:var(--muted);margin:6px 0 0}
 .log{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .log .ev{padding:5px 8px;border-bottom:1px solid #241c3d;word-break:break-word}
 .tev{padding:5px 8px;border-bottom:1px solid #241c3d;font-size:12px;word-break:break-word}
-.sev-fail{color:var(--red)} .sev-approval{color:var(--amber)} .sev-done{color:var(--green)}
+.sev-fail{color:var(--redlt)} .sev-approval{color:var(--amber)} .sev-done{color:var(--green)}
 dl{display:grid;grid-template-columns:170px 1fr;gap:6px 14px;font-size:14px}
 dt{color:var(--muted)} dd{margin:0;word-break:break-word}
-#loginbox{display:none;background:#12283f;border:1px solid #1d4a73;border-radius:10px;
+#loginbox{display:none;background:#0d1b2e;border:1px solid #1d4a73;border-radius:10px;
 padding:12px;margin:14px 0}
 .fchips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0;align-items:center}
 .fchip{background:transparent;border:1px solid var(--line);color:var(--text);border-radius:999px;
 padding:5px 12px;font-size:12.5px;cursor:pointer}
 .fchip:hover{background:var(--card)}
 .fchip.active{background:var(--violet);border-color:var(--violet);color:#fff}
-.prog{background:var(--panel);border-radius:5px;height:7px;overflow:hidden;margin-top:6px}
+.prog{background:#241a45;border-radius:5px;height:7px;overflow:hidden;margin-top:6px}
 .prog i{display:block;height:100%;background:var(--violet2)}
 .statusline{min-height:18px;font-size:13px;margin:6px 0;color:var(--green)}
-.statusline.err{color:var(--red)}
+.statusline.err{color:var(--redlt)}
 .actchart{display:flex;align-items:flex-end;gap:3px;height:74px;margin-top:8px}
-.actbar{flex:1;background:var(--violet);border-radius:3px 3px 0 0;min-height:2px}
+.actbar{flex:1;background:linear-gradient(180deg,var(--violet2),var(--violet));border-radius:3px 3px 0 0;min-height:2px}
 .actlabels{display:flex;gap:3px;font-size:9px;color:var(--muted);margin-top:3px}
 .actlabels span{flex:1;text-align:center;overflow:hidden;white-space:nowrap}
 .donutwrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
@@ -501,6 +579,22 @@ align-items:flex-start;justify-content:center;padding-top:9vh}
 .palettebox{width:min(560px,92vw);background:var(--panel);border:1px solid var(--violet);
 border-radius:12px;padding:10px;box-shadow:0 18px 48px rgba(0,0,0,.6)}
 .palettebox input{width:100%}
+.drawer{position:fixed;inset:0;background:rgba(5,3,12,.72);z-index:60;display:none;
+align-items:flex-start;justify-content:center;padding-top:6vh}
+.drawerbox{width:min(700px,94vw);max-height:86vh;overflow:auto;background:var(--panel);
+border:1px solid var(--violet);border-radius:18px;padding:16px;box-shadow:0 18px 48px rgba(0,0,0,.6)}
+.dgroup{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;
+color:var(--muted);margin:14px 2px 7px}
+.dtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(102px,1fr));gap:8px}
+.dtile{position:relative;background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:12px 6px;text-align:center;cursor:pointer;color:var(--text);font-size:13px;width:100%}
+.dtile:hover{border-color:var(--violet2);background:var(--card2)}
+.dtile .navcount{position:absolute;top:6px;right:6px}
+.bottomnav{display:none;position:fixed;left:0;right:0;bottom:0;z-index:45;background:var(--panel2);
+border-top:1px solid var(--line);padding:6px 8px calc(6px + env(safe-area-inset-bottom))}
+.bottomnav button{flex:1;background:transparent;color:var(--muted);border:0;border-radius:10px;
+padding:9px 4px;font-size:12.5px;font-weight:600;cursor:pointer}
+.bottomnav button.active{background:var(--violet);color:#fff}
 .bubble{max-width:88%;padding:10px 13px;border-radius:12px;margin:9px 0;font-size:14px;
 word-break:break-word}
 .bubble.user{background:var(--violet);color:#fff;margin-left:auto;border-bottom-right-radius:4px}
@@ -514,48 +608,57 @@ body.compact .stat{padding:8px}
 body.compact .stat .num{font-size:19px}
 body.compact .navbtn{padding:7px 10px}
 body.compact .seclabel{margin:13px 0 6px}
+body.compact .shelf{padding:10px;margin:11px 0}
+body.compact .tile{flex-basis:34px;width:34px;height:34px}
 @media (max-width:820px){
+ .sidebar{display:none}
+ .bottomnav{display:flex}
  .layout{flex-direction:column}
- .sidebar{width:100%;flex:none;height:auto;position:static;flex-direction:row;flex-wrap:wrap;
-  align-items:center;padding:10px}
- .brandsub,.sidefoot{display:none}
- .navbtn{width:auto;padding:8px 10px}
+ content{padding:14px 14px 96px}
  .grid2{grid-template-columns:1fr}
+ .topbar{padding:10px 12px}
 }
 </style></head><body>
 <div class="layout">
 <nav class="sidebar">
- <div class="brand">Ghost Agent</div>
- <div class="brandsub">Persistent governed operator<br>Ghost Developer Studio</div>
+ <div class="brandrow">__BRANDMARK__
+  <div><div class="brand">Ghost Agent</div>
+  <div class="brandsub">Governed operator - Ghost Developer Studio</div></div>
+ </div>
+ <div class="navgroup">Operate</div>
  <button class="navbtn" data-page="overview">Overview</button>
  <button class="navbtn" data-page="board">Board</button>
- <button class="navbtn" data-page="approvals">Approvals <span class="navcount" id="nav-approvals" style="display:none">0</span></button>
- <button class="navbtn" data-page="tasks">Tasks <span class="navcount alt" id="nav-tasks" style="display:none">0</span></button>
  <button class="navbtn" data-page="chat">Chat</button>
+ <button class="navbtn" data-page="tasks">Tasks <span class="navcount alt" id="nav-tasks" style="display:none">0</span></button>
+ <button class="navbtn" data-page="approvals">Approvals <span class="navcount" id="nav-approvals" style="display:none">0</span></button>
+ <button class="navbtn" data-page="schedules">Schedules <span class="navcount alt" id="nav-schedules" style="display:none">0</span></button>
+ <div class="navgroup">Intelligence</div>
  <button class="navbtn" data-page="memory">Memory <span class="navcount alt" id="nav-memory" style="display:none">0</span></button>
  <button class="navbtn" data-page="skills">Skills</button>
  <button class="navbtn" data-page="analytics">Analytics</button>
  <button class="navbtn" data-page="logs">Logs</button>
- <button class="navbtn" data-page="schedules">Schedules <span class="navcount alt" id="nav-schedules" style="display:none">0</span></button>
+ <div class="navgroup">System</div>
  <button class="navbtn" data-page="system">System</button>
  <div class="sidefoot">v__VERSION__ - zero dependencies<br>stdlib only - $0 to run</div>
 </nav>
 <div class="main">
 <div class="topbar">
  <span class="t">Ghost Agent</span>
+ <span class="surface" id="hdr-surface">Overview</span>
  <span class="pill">version <b>v__VERSION__</b></span>
  <span class="pill">model <b id="hdr-model">-</b></span>
  <span class="pill">pending approvals <b id="hdr-pending">0</b></span>
  <span class="pill" id="hdr-auth">auth -</span>
  <span class="searchwrap"><input id="globalsearch" placeholder="Search tasks, memory, skills, trail..." oninput="globalSearch()" autocomplete="off">
  <div class="searchresults" id="search-results"></div></span>
+ <button class="ghostbtn small" id="apps-btn" onclick="openDrawer()">All Apps</button>
  <button class="ghostbtn small" id="density-btn" onclick="toggleDensity()">Density: Comfortable</button>
  <button class="ghostbtn small" onclick="openPalette()">Palette (Ctrl+K)</button>
 </div>
 <div class="warn" id="warnbar">WARNING: __WARNING__</div>
 <content>
 <div id="loginbox">
- <b>Dashboard token required.</b>
+ <div style="display:flex;gap:10px;align-items:center">__BRANDMARK__<b>Dashboard token required.</b></div>
  <p class="small">Enter the GHOST_AGENT_DASHBOARD_TOKEN for this server. It is kept only in a cookie on this browser and sent as a header - never logged by the server.</p>
  <input type="password" id="tokeninput" placeholder="dashboard token">
  <button onclick="unlock()">Unlock</button>
@@ -576,10 +679,14 @@ body.compact .seclabel{margin:13px 0 6px}
  <form id="taskform"><input class="wide" id="goal" placeholder="e.g. write notes.txt with: hello" required>
  <p><button type="submit">Create and run task</button></p></form>
  <div class="statusline" id="ov-status"></div>
- <div class="seclabel">Needs your attention</div>
- <div id="ov-attention"></div>
- <div class="seclabel">Recent tasks</div>
- <div id="ov-recent"></div>
+ <div class="shelf shelf-amber" id="ov-attention-shelf">
+  <div class="shelf-h"><span class="sl">Needs your attention</span><span class="shelf-pill" id="ov-attn-pill">0 waiting</span></div>
+  <div id="ov-attention"></div>
+ </div>
+ <div class="shelf" id="ov-recent-shelf">
+  <div class="shelf-h"><span class="sl">Recent tasks</span><span class="shelf-pill" id="ov-recent-pill">0</span></div>
+  <div id="ov-recent"></div>
+ </div>
 </section>
 
 <section class="page" id="page-board">
@@ -592,14 +699,18 @@ body.compact .seclabel{margin:13px 0 6px}
 <section class="page" id="page-approvals">
  <h2 class="ptitle">Approvals</h2>
  <p class="pdesc">Write and exec steps wait here. Approving runs the step; denying fails the task honestly. Nothing executes before its trail record is written.</p>
- <div class="seclabel">Pending</div>
- <p><button id="ap-approve-all" onclick="decideAll('approved')">Approve all</button>
- <button class="deny" id="ap-deny-all" onclick="decideAll('denied')">Deny all</button>
- <span class="small">Bulk actions decide only what is pending right now, each through the normal per-item path.</span></p>
- <div class="statusline" id="ap-status"></div>
- <div id="approvals"></div>
- <div class="seclabel">Recent decisions</div>
- <div id="ap-decisions"></div>
+ <div class="shelf shelf-amber" id="ap-pending-shelf">
+  <div class="shelf-h"><span class="sl">Pending</span><span class="shelf-pill" id="ap-pending-pill">0 waiting</span></div>
+  <p style="margin-top:0"><button id="ap-approve-all" onclick="decideAll('approved')">Approve all</button>
+  <button class="deny" id="ap-deny-all" onclick="decideAll('denied')">Deny all</button>
+  <span class="small">Bulk actions decide only what is pending right now, each through the normal per-item path.</span></p>
+  <div class="statusline" id="ap-status"></div>
+  <div id="approvals"></div>
+ </div>
+ <div class="shelf" id="ap-decisions-shelf">
+  <div class="shelf-h"><span class="sl">Recent decisions</span></div>
+  <div id="ap-decisions"></div>
+ </div>
 </section>
 
 <section class="page" id="page-tasks">
@@ -642,10 +753,14 @@ body.compact .seclabel{margin:13px 0 6px}
  <p class="small">New memories land as candidates below - never trusted directly.</p>
  <div class="statusline" id="mem-status"></div>
  <input class="wide" id="mem-q" placeholder="search memory" oninput="renderMemory()">
- <div class="seclabel">Candidates - waiting for your decision</div>
- <div id="mem-candidates"></div>
- <div class="seclabel">Trusted</div>
- <div id="mem-trusted"></div>
+ <div class="shelf shelf-amber" id="mem-candidates-shelf">
+  <div class="shelf-h"><span class="sl">Candidates - waiting for your decision</span><span class="shelf-pill" id="mem-cand-pill">0</span></div>
+  <div id="mem-candidates"></div>
+ </div>
+ <div class="shelf shelf-green" id="mem-trusted-shelf">
+  <div class="shelf-h"><span class="sl">Trusted</span><span class="shelf-pill" id="mem-trusted-pill">0</span></div>
+  <div id="mem-trusted"></div>
+ </div>
 </section>
 
 <section class="page" id="page-skills">
@@ -730,6 +845,40 @@ body.compact .seclabel{margin:13px 0 6px}
 </section>
 </content>
 </div></div>
+<nav class="bottomnav" id="bottomnav">
+ <button data-nav="overview" onclick="showPage('overview')">Home</button>
+ <button data-nav="board" onclick="showPage('board')">Board</button>
+ <button data-nav="chat" onclick="showPage('chat')">Agents</button>
+ <button data-nav="drawer" onclick="openDrawer()">More</button>
+</nav>
+<div class="drawer" id="drawer">
+ <div class="drawerbox">
+  <div style="display:flex;gap:10px;align-items:center">
+   __BRANDMARK__<b>All Apps</b>
+   <button class="ghostbtn small" style="margin-left:auto" onclick="closeDrawer()">Close (Esc)</button>
+  </div>
+  <div class="dgroup">OPERATE</div>
+  <div class="dtiles">
+   <button class="dtile" data-page="overview" onclick="drawerGo('overview')">Overview</button>
+   <button class="dtile" data-page="board" onclick="drawerGo('board')">Board</button>
+   <button class="dtile" data-page="chat" onclick="drawerGo('chat')">Chat</button>
+   <button class="dtile" data-page="tasks" onclick="drawerGo('tasks')">Tasks <span class="navcount alt" id="d-nav-tasks" style="display:none">0</span></button>
+   <button class="dtile" data-page="approvals" onclick="drawerGo('approvals')">Approvals <span class="navcount" id="d-nav-approvals" style="display:none">0</span></button>
+   <button class="dtile" data-page="schedules" onclick="drawerGo('schedules')">Schedules <span class="navcount alt" id="d-nav-schedules" style="display:none">0</span></button>
+  </div>
+  <div class="dgroup">INTELLIGENCE</div>
+  <div class="dtiles">
+   <button class="dtile" data-page="memory" onclick="drawerGo('memory')">Memory <span class="navcount alt" id="d-nav-memory" style="display:none">0</span></button>
+   <button class="dtile" data-page="skills" onclick="drawerGo('skills')">Skills</button>
+   <button class="dtile" data-page="analytics" onclick="drawerGo('analytics')">Analytics</button>
+   <button class="dtile" data-page="logs" onclick="drawerGo('logs')">Logs</button>
+  </div>
+  <div class="dgroup">SYSTEM</div>
+  <div class="dtiles">
+   <button class="dtile" data-page="system" onclick="drawerGo('system')">System</button>
+  </div>
+ </div>
+</div>
 <div class="palette" id="palette">
  <div class="palettebox">
   <input id="palette-q" placeholder="Go to a page or run an action..." oninput="renderPalette()" onkeydown="if(event.key==='Enter'){event.preventDefault();paletteGo(0)}" autocomplete="off">
@@ -740,6 +889,7 @@ body.compact .seclabel{margin:13px 0 6px}
 <script>
 const AUTH_REQUIRED="__AUTH_REQUIRED__"==="1";
 const PAGES=["overview","board","approvals","tasks","chat","memory","skills","analytics","logs","schedules","system"];
+const PAGE_TITLES={overview:"Overview",board:"Board",approvals:"Approvals",tasks:"Tasks",chat:"Chat",memory:"Memory",skills:"Skills",analytics:"Analytics",logs:"Logs",schedules:"Schedules",system:"System"};
 let curPage="overview", selectedTask=null, logTypesLoaded=false;
 let logsPaused=false, lastBoard=null, lastMem=null, lastSkills=null, lastLogs=[], lastApprovals=[];
 let lastSchedules=[], chatTaskId=null, paletteFiltered=[];
@@ -768,9 +918,14 @@ function showPage(name){
   curPage=name;
   document.querySelectorAll(".page").forEach(p=>p.classList.toggle("active",p.id==="page-"+name));
   document.querySelectorAll(".navbtn").forEach(b=>b.classList.toggle("active",b.dataset.page===name));
+  document.querySelectorAll(".bottomnav button").forEach(b=>b.classList.toggle("active",b.dataset.nav===name));
+  const sf=document.getElementById("hdr-surface"); if(sf) sf.textContent=PAGE_TITLES[name]||name;
   try{history.replaceState(null,"","#"+name)}catch(e){}
   window.scrollTo(0,0);
 }
+function openDrawer(){ document.getElementById("drawer").style.display="flex"; }
+function closeDrawer(){ document.getElementById("drawer").style.display="none"; }
+function drawerGo(p){ closeDrawer(); showPage(p); }
 document.querySelectorAll(".navbtn").forEach(b=>b.addEventListener("click",()=>showPage(b.dataset.page)));
 function gotoTask(id){showPage("tasks");detail(id)}
 const cols=[["running","Running"],["waiting_approval","Waiting approval"],["done","Done"],["failed","Failed"]];
@@ -807,7 +962,7 @@ function activityChart(data){
   if(!total) h+="<p class='small'>No trail events in the last 14 days.</p>";
   return h;
 }
-const STATUS_COLORS={done:"#3ecf6f",failed:"#f26d6d",waiting_approval:"#f5b93f",running:"#8b5cf6",pending:"#5ea8ff",unknown:"#8a86a3"};
+const STATUS_COLORS={done:"#3ecf6e",failed:"#ff5c5c",waiting_approval:"#ffb43a",running:"#a678ff",pending:"#5ea8ff",unknown:"#8a86a3"};
 function donut(obj){
   const entries=Object.entries(obj||{}).filter(([,v])=>v>0);
   const total=entries.reduce((a,[,v])=>a+v,0);
@@ -850,6 +1005,29 @@ function toggleExpand(btn){
 }
 function taskStepCounts(t){ const steps=t.steps||[];
   return {done:steps.filter(s=>s.status==="done").length,total:steps.length}; }
+function glyphFor(tool){
+  return {write_file:"WRITE",read_file:"READ",list_dir:"LIST",echo_note:"NOTE",shell:"EXEC"}[tool]
+    ||String(tool||"STEP").slice(0,5).toUpperCase();
+}
+function provStrip(cells){
+  const live=cells.filter(c=>c[1]!==null&&c[1]!==undefined&&String(c[1])!=="");
+  if(!live.length) return "";
+  return "<div class='prov'>"+live.map((c,i)=>
+    (i?"<span class='arr'>&rarr;</span>":"")+"<span class='pc'><span class='pl'>"+esc(c[0])+"</span><span class='pv'>"+esc(c[1])+"</span></span>").join("")+"</div>";
+}
+function effectFor(tool){
+  if(tool==="write_file") return "new file";
+  if(tool==="shell") return "command execution";
+  return tool||"-";
+}
+function approvalProv(a){
+  const req=a.tool+((a.step_index!==null&&a.step_index!==undefined)?" - step "+a.step_index:"");
+  return provStrip([["Source",a.task_title||a.task_id],["Requested",req],["Effect",effectFor(a.tool)]]);
+}
+function taskProv(t){
+  const sc=taskStepCounts(t);
+  return provStrip([["Model",t.model||"-"],["Step",sc.done+" of "+sc.total],["Status",t.status]]);
+}
 async function detail(id){
   selectedTask=id;
   let d; try{ d=await j("/api/tasks/"+id) }catch(e){ return }
@@ -860,7 +1038,7 @@ async function detail(id){
   document.getElementById("td-actions").innerHTML=d.task.status==="failed"
     ?"<p><button onclick='retryTask(\\""+d.task.id+"\\")'>Retry this task</button> <span class='small'>Creates a new task with the same goal; the original stays as-is.</span></p>":"";
   document.getElementById("td-steps").innerHTML=(d.task.steps||[]).length?(d.task.steps||[]).map((s,i)=>
-    "<div class='card'>"+i+". "+esc(s.tool)+" "+badge(s.status)+
+    "<div class='card'><div class='cardhead'><span class='rank'>"+(i+1)+"</span><span class='tile'>"+glyphFor(s.tool)+"</span><span class='cardmain'><b>"+esc(s.tool)+"</b> "+badge(s.status)+"</span></div>"+
     (s.error?"<pre class='stepout'>error: "+esc(s.error)+"</pre>":"")+
     (s.result&&s.result.output?"<pre class='stepout'>"+esc(s.result.output)+"</pre>":"")+
     "<div class='small'>args: "+esc(JSON.stringify(s.args||{}))+"</div></div>").join("")
@@ -916,14 +1094,16 @@ function renderBoard(){
   const match=t=>{ if(!q) return true;
     const tools=(t.steps||[]).map(s=>s.tool||"").join(" ");
     return ((t.title||"")+" "+(t.goal||"")+" "+tools).toLowerCase().includes(q); };
+  const colShelf={running:"shelf-violet",waiting_approval:"shelf-amber",done:"shelf-green",failed:"shelf-red"};
   el.innerHTML=cols.map(([k,label])=>{
     const all=lastBoard.columns[k]||[];
     const list=all.filter(match);
-    return "<div class='col'><h3>"+label+" ("+all.length+")</h3>"+
-      (list.length? list.map(t=>{ const sc=taskStepCounts(t);
-        return "<div class='card'><a href='#' onclick='gotoTask(\\""+t.id+"\\");return false'>"+esc(t.title)+"</a><br>"+badge(t.status)+
-          "<div class='small'>model "+esc(t.model||"-")+" - created "+esc(fmtTime(t.created_at))+"</div>"+
-          progressBar(sc.done,sc.total)+"<div class='small'>steps "+sc.done+"/"+sc.total+"</div>"+
+    return "<div class='col shelf "+colShelf[k]+"'><div class='shelf-h'><span class='sl'>"+label+"</span><span class='shelf-pill'>"+all.length+"</span></div>"+
+      (list.length? list.map((t,idx)=>{ const sc=taskStepCounts(t);
+        return "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>"+glyphFor((t.steps&&t.steps[0]&&t.steps[0].tool)||"")+"</span><span class='cardmain'><a href='#' onclick='gotoTask(\\""+t.id+"\\");return false'>"+esc(t.title)+"</a><br>"+badge(t.status)+"</span></div>"+
+          "<div class='small' style='margin-top:7px'>created "+esc(fmtTime(t.created_at))+"</div>"+
+          progressBar(sc.done,sc.total)+
+          taskProv(t)+
           (t.status==="failed"?"<p style='margin:6px 0 2px'><button class='ghostbtn small' onclick='retryTask(\\""+t.id+"\\")'>Retry</button></p>":"")+"</div>"; }).join("")
       : "<p class='small'>"+(q?"No cards match the filter.":"No tasks here.")+"</p>")+"</div>";
   }).join("");
@@ -942,7 +1122,7 @@ function renderTaskList(){
   });
   el.innerHTML=list.length? list.map(t=>
     "<div class='card'><a href='#' onclick='detail(\\""+t.id+"\\");return false'>"+esc(t.title)+"</a><br>"+badge(t.status)+
-    "<div class='small'>model "+esc(t.model||"-")+"</div></div>").join("")
+    taskProv(t)+"</div>").join("")
     :"<p class='small'>"+(all.length?"No tasks match this filter.":"No tasks yet.")+"</p>";
 }
 function argRows(args){
@@ -958,10 +1138,13 @@ function argRows(args){
 }
 function renderApprovals(){
   const pend=lastApprovals.filter(a=>a.status==="pending");
-  document.getElementById("approvals").innerHTML=pend.length? pend.map(a=>
-    "<div class='card'><b>"+esc(a.tool)+"</b> on task <b>"+esc(a.task_title||a.task_id)+"</b> "+badge("waiting_approval")+
+  const apPill=document.getElementById("ap-pending-pill");
+  if(apPill) apPill.textContent=pend.length+" waiting";
+  document.getElementById("approvals").innerHTML=pend.length? pend.map((a,idx)=>
+    "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>"+glyphFor(a.tool)+"</span><span class='cardmain'><b>"+esc(a.tool)+"</b> on task <b>"+esc(a.task_title||a.task_id)+"</b> "+badge("waiting_approval")+"</span></div>"+
     "<div style='margin:8px 0'>"+argRows(a.args)+"</div>"+
     "<div class='small'>reason: "+esc(a.reason||"-")+"</div>"+
+    approvalProv(a)+
     "<p><button onclick='act(\\""+a.task_id+"\\",\\"approve\\")'>Approve</button> "+
     "<button class='deny' onclick='act(\\""+a.task_id+"\\",\\"deny\\")'>Deny</button></p></div>").join("")
     :"<p class='small'>Nothing waiting.</p>";
@@ -976,15 +1159,21 @@ function renderMemory(){
   const q=(document.getElementById("mem-q").value||"").toLowerCase();
   const match=x=>!q||(x.text||"").toLowerCase().includes(q);
   const cands=(lastMem.candidates||[]).filter(match), trusted=(lastMem.trusted||[]).filter(match);
-  document.getElementById("mem-candidates").innerHTML=cands.length? cands.map(x=>
-    "<div class='card'>"+esc(x.text)+" "+badge("candidate")+" <span class='badge b-pending'>not verified</span>"+
-    "<div class='small'>source: "+esc(x.source)+" - created "+esc(fmtDay(x.created_at))+"</div>"+
+  const candPill=document.getElementById("mem-cand-pill");
+  if(candPill) candPill.textContent=(lastMem.candidates||[]).length+" candidate";
+  const truPill=document.getElementById("mem-trusted-pill");
+  if(truPill) truPill.textContent=(lastMem.trusted||[]).length+" trusted";
+  document.getElementById("mem-candidates").innerHTML=cands.length? cands.map((x,idx)=>
+    "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>MEM</span><span class='cardmain'>"+esc(x.text)+" "+badge("candidate")+" <span class='badge b-pending'>not verified</span>"+
+    "<div class='small'>created "+esc(fmtDay(x.created_at))+"</div></span></div>"+
+    provStrip([["Source",x.source],["Status","candidate"],["Verified","no"]])+
     "<p><button onclick='memAct(\\""+x.id+"\\",\\"approve\\")'>Approve</button> "+
     "<button class='deny' onclick='memAct(\\""+x.id+"\\",\\"reject\\")'>Reject</button></p></div>").join("")
     :"<p class='small'>"+((lastMem.candidates||[]).length?"No candidates match the search.":"No candidates waiting.")+"</p>";
-  document.getElementById("mem-trusted").innerHTML=trusted.length? trusted.map(x=>
-    "<div class='card'>"+esc(x.text)+" "+badge("trusted")+" "+(x.verified?"<span class='badge b-done'>verified</span>":"<span class='badge b-pending'>unverified</span>")+
-    "<div class='small'>source: "+esc(x.source)+" - created "+esc(fmtDay(x.created_at))+"</div></div>").join("")
+  document.getElementById("mem-trusted").innerHTML=trusted.length? trusted.map((x,idx)=>
+    "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>MEM</span><span class='cardmain'>"+esc(x.text)+" "+badge("trusted")+" "+(x.verified?"<span class='badge b-done'>verified</span>":"<span class='badge b-pending'>unverified</span>")+
+    "<div class='small'>created "+esc(fmtDay(x.created_at))+"</div></span></div>"+
+    provStrip([["Source",x.source],["Status","trusted"],["Verified",x.verified?"yes":"no"]])+"</div>").join("")
     :"<p class='small'>"+((lastMem.trusted||[]).length?"No trusted memories match the search.":"No trusted memory yet.")+"</p>";
 }
 function renderSkills(){
@@ -999,17 +1188,25 @@ function renderSkills(){
     if(q && !((x.name||"")+" "+(x.tools||[]).join(" ")).toLowerCase().includes(q)) return false;
     return true;
   });
-  document.getElementById("skills").innerHTML=list.length? list.map(x=>{
+  const skillCard=(x,idx)=>{
     const timeline=(x.steps||[]).map(s=>esc(s.tool||"?")).join(" &rarr; ");
-    const perms=(x.permissions||[]).map(p=>"<span class='pill'>"+esc(p)+"</span>").join(" ");
-    const from=x.from_task? "from task: "+esc(titles[x.from_task]||x.from_task) : "";
-    return "<div class='card'><b>"+esc(x.name)+"</b> "+badge(x.trusted?"trusted":"candidate")+
+    const from=x.from_task? (titles[x.from_task]||x.from_task) : null;
+    return "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>SKILL</span><span class='cardmain'><b>"+esc(x.name)+"</b> "+badge(x.trusted?"trusted":"candidate")+"</span></div>"+
       (timeline?"<div class='tl' style='margin-top:6px'>"+timeline+"</div>":"")+
       "<div class='small' style='margin-top:6px'>tools: "+esc((x.tools||[]).join(", "))+"</div>"+
-      (perms?"<div style='margin-top:6px'>"+perms+"</div>":"")+
-      (from?"<div class='small' style='margin-top:6px'>"+from+"</div>":"")+
+      provStrip([["Source",from],["Permissions",(x.permissions||[]).join(", ")||null],["Status",x.trusted?"trusted":"candidate"]])+
       (x.trusted?"":"<p><button onclick='skillAct(\\""+x.id+"\\")'>Promote to trusted</button></p>")+"</div>";
-  }).join("") : "<p class='small'>"+(all.length?"No skills match this filter.":"No skills yet. Finish a task and one will be proposed.")+"</p>";
+  };
+  const skillShelf=(items,cls,label)=> items.length?
+    "<div class='shelf "+cls+"'><div class='shelf-h'><span class='sl'>"+label+"</span><span class='shelf-pill'>"+items.length+"</span></div>"+
+    items.map((x,i)=>skillCard(x,i)).join("")+"</div>" : "";
+  let sh="";
+  if(list.length){
+    if(skillStatusFilter!=="trusted") sh+=skillShelf(list.filter(x=>!x.trusted),"shelf-amber","Candidates - untrusted");
+    if(skillStatusFilter!=="candidate") sh+=skillShelf(list.filter(x=>x.trusted),"shelf-green","Trusted");
+  }
+  document.getElementById("skills").innerHTML= sh ||
+    "<p class='small'>"+(all.length?"No skills match this filter.":"No skills yet. Finish a task and one will be proposed.")+"</p>";
 }
 function shownLogs(){
   const sev=document.getElementById("log-sev").value;
@@ -1070,17 +1267,25 @@ function renderSchedules(){
   const navS=document.getElementById("nav-schedules");
   const enabledCount=lastSchedules.filter(s=>s.enabled).length;
   navS.style.display=enabledCount?"inline-block":"none"; navS.textContent=enabledCount;
-  el.innerHTML=lastSchedules.length? lastSchedules.map(s=>{
+  const dNavS=document.getElementById("d-nav-schedules");
+  if(dNavS){ dNavS.style.display=enabledCount?"inline-block":"none"; dNavS.textContent=enabledCount; }
+  const schedCard=(s,idx)=>{
     const kind=s.kind==="daily"? "daily at "+esc(s.time_hhmm||"") : "every "+esc(s.interval_minutes)+" min";
-    return "<div class='card'><b>"+esc(s.title||s.goal)+"</b> "+
+    return "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>AUTO</span><span class='cardmain'><b>"+esc(s.title||s.goal)+"</b> "+
       "<span class='badge b-"+(s.enabled?"done":"pending")+"'>"+(s.enabled?"enabled":"disabled")+"</span> "+
-      "<span class='pill'>"+kind+"</span>"+
+      "<span class='pill'>"+kind+"</span></span></div>"+
       "<div class='small' style='margin-top:6px'>goal: "+esc(s.goal)+"</div>"+
       "<div class='small'>next run: "+esc(fmtTime(s.next_run_at))+" - last run: "+esc(fmtTime(s.last_run_at))+
       (s.last_task_id?" - <a href='#' onclick='gotoTask(\\""+s.last_task_id+"\\");return false'>last task</a>":"")+"</div>"+
       "<p><button class='ghostbtn small' onclick='schAct(\\""+s.id+"\\",\\"toggle\\")'>"+(s.enabled?"Disable":"Enable")+"</button> "+
       "<button class='ghostbtn small' onclick='schAct(\\""+s.id+"\\",\\"run\\")'>Run now</button> "+
-      "<button class='deny small' onclick='schAct(\\""+s.id+"\\",\\"delete\\")'>Delete</button></p></div>"; }).join("")
+      "<button class='deny small' onclick='schAct(\\""+s.id+"\\",\\"delete\\")'>Delete</button></p></div>"; };
+  const schedShelf=(items,cls,label)=> items.length?
+    "<div class='shelf "+cls+"'><div class='shelf-h'><span class='sl'>"+label+"</span><span class='shelf-pill'>"+items.length+"</span></div>"+
+    items.map((s,i)=>schedCard(s,i)).join("")+"</div>" : "";
+  el.innerHTML=lastSchedules.length?
+    schedShelf(lastSchedules.filter(s=>s.enabled),"shelf-violet","Active schedules")+
+    schedShelf(lastSchedules.filter(s=>!s.enabled),"","Paused schedules")
     :"<p class='small'>No schedules yet. Create one above - remember, it fires only while this dashboard server is running.</p>";
 }
 async function schAct(id,what){
@@ -1096,8 +1301,8 @@ async function schAct(id,what){
 function chatArgs(s){ const a=JSON.stringify(s.args||{}); return a.length>170?a.slice(0,170)+"...":a }
 function renderChat(task){
   let h="<div class='bubble user'>"+esc(task.goal)+"</div>";
-  h+=(task.steps||[]).map(s=>
-    "<div class='card'><b>"+esc(s.tool||"step")+"</b> "+badge(s.status)+
+  h+=(task.steps||[]).map((s,i)=>
+    "<div class='card'><div class='cardhead'><span class='rank'>"+(i+1)+"</span><span class='tile'>"+glyphFor(s.tool)+"</span><span class='cardmain'><b>"+esc(s.tool||"step")+"</b> "+badge(s.status)+"</span></div>"+
     "<div class='small'>"+esc(chatArgs(s))+"</div>"+
     (s.error?"<pre class='stepout'>error: "+esc(s.error)+"</pre>":"")+
     (s.result&&s.result.output?"<pre class='stepout'>"+esc(s.result.output)+"</pre>":"")+"</div>").join("");
@@ -1185,7 +1390,7 @@ function openPalette(){
 function closePalette(){ document.getElementById("palette").style.display="none"; }
 document.addEventListener("keydown",e=>{
   if((e.ctrlKey||e.metaKey)&&(e.key==="k"||e.key==="K")){ e.preventDefault(); openPalette(); }
-  if(e.key==="Escape") closePalette();
+  if(e.key==="Escape"){ closePalette(); closeDrawer(); }
 });
 function toggleDensity(){
   const c=document.body.classList.toggle("compact");
@@ -1216,6 +1421,10 @@ async function refresh(){
   const navM=document.getElementById("nav-memory");
   navM.style.display=ov.candidate_memories?"inline-block":"none";
   navM.textContent=ov.candidate_memories;
+  const mirror=(id,val)=>{ const el=document.getElementById(id); if(el){ el.style.display=val?"inline-block":"none"; el.textContent=val; } };
+  mirror("d-nav-approvals",ov.pending_approvals.length);
+  mirror("d-nav-tasks",ov.counts.running);
+  mirror("d-nav-memory",ov.candidate_memories);
   const wb=document.getElementById("warnbar");
   wb.textContent="WARNING: "+sys.warning;
   wb.classList.toggle("token",!!sys.auth.token_required);
@@ -1226,13 +1435,18 @@ async function refresh(){
     statCard(c.done,"Done","board")+statCard(c.failed,"Failed","board")+statCard(ov.trusted_memories,"Trusted memories","memory")+
     statCard(ov.candidate_memories,"Memory candidates","memory")+statCard(ov.skills_total,"Skills","skills")+statCard(ov.trail_events,"Trail events","logs");
   document.getElementById("ov-activity").innerHTML=activityChart(ov.activity_by_day);
-  document.getElementById("ov-attention").innerHTML=ov.pending_approvals.length?ov.pending_approvals.map(a=>
-    "<div class='card'><b>"+esc(a.tool)+"</b> on task "+esc(a.task_title||a.task_id)+
-    " - <a href='#' onclick='showPage(\\"approvals\\");return false'>review in Approvals</a></div>").join("")
+  const attnPill=document.getElementById("ov-attn-pill");
+  if(attnPill) attnPill.textContent=ov.pending_approvals.length+" waiting";
+  document.getElementById("ov-attention").innerHTML=ov.pending_approvals.length?ov.pending_approvals.map((a,idx)=>
+    "<div class='card'><div class='cardhead'><span class='rank'>"+(idx+1)+"</span><span class='tile'>"+glyphFor(a.tool)+"</span><span class='cardmain'><b>"+esc(a.tool)+"</b> on task "+esc(a.task_title||a.task_id)+
+    " - <a href='#' onclick='showPage(\\"approvals\\");return false'>review in Approvals</a></span></div>"+approvalProv(a)+"</div>").join("")
     :"<p class='small'>Nothing is waiting on you.</p>";
+  const recPill=document.getElementById("ov-recent-pill");
+  if(recPill) recPill.textContent=ov.recent_tasks.length;
   document.getElementById("ov-recent").innerHTML=ov.recent_tasks.length?ov.recent_tasks.map(t=>
     "<div class='card'><a href='#' onclick='gotoTask(\\""+t.id+"\\");return false'>"+esc(t.title)+"</a> "+badge(t.status)+
-    "<div class='small'>model "+esc(t.model||"-")+" - steps "+t.steps_done+"/"+t.steps_total+"</div>"+progressBar(t.steps_done,t.steps_total)+"</div>").join("")
+    progressBar(t.steps_done,t.steps_total)+
+    provStrip([["Model",t.model||"-"],["Step",t.steps_done+" of "+t.steps_total],["Status",t.status]])+"</div>").join("")
     :"<p class='small'>No tasks yet. Create one above.</p>";
   // board, tasks, approvals, memory, skills, schedules, chat picker
   renderBoard(); renderTaskList(); renderApprovals(); renderMemory(); renderSkills();
@@ -1262,19 +1476,19 @@ async function refresh(){
     "<dt>Model API key present</dt><dd>"+(sys.api_key_present?"yes (value never shown or logged)":"no - MockModel planning")+"</dd>"+
     "<dt>Auth mode</dt><dd>"+esc(sys.auth.mode)+"</dd>"+
     "<dt>Local-only warning</dt><dd>"+esc(sys.warning)+"</dd></dl>";
-  sh+="<div class='seclabel'>Health</div><div id='sys-health'><dl>"+
+  sh+="<div class='shelf shelf-green'><div class='shelf-h'><span class='sl'>Health</span></div><div id='sys-health'><dl>"+
     "<dt>Python version</dt><dd>"+esc(h.python_version||"-")+"</dd>"+
     "<dt>Server time (UTC)</dt><dd>"+esc(h.server_time_utc||"-")+"</dd>"+
     "<dt>Store home exists</dt><dd>"+(h.store_home_exists?"yes":"no")+"</dd>"+
     "<dt>Workspace exists</dt><dd>"+(h.workspace_exists?"yes":"no")+"</dd>"+
     "<dt>Workspace writable</dt><dd>"+(h.workspace_writable?"yes":"NO")+"</dd>"+
     "<dt>Tasks total</dt><dd>"+(h.tasks_total??"-")+"</dd>"+
-    "<dt>Trail events total</dt><dd>"+(h.trail_events_total??"-")+"</dd></dl></div>";
+    "<dt>Trail events total</dt><dd>"+(h.trail_events_total??"-")+"</dd></dl></div></div>";
   const loop=!!sys.auth.loopback, tokR=!!sys.auth.token_required;
-  sh+="<div class='seclabel'>Auth posture</div>"+
+  sh+="<div class='shelf "+(tokR?"shelf-green":"shelf-amber")+"'><div class='shelf-h'><span class='sl'>Auth posture</span></div>"+
     posture(loop,loop?"Bound to loopback - not reachable from other machines":"Bound beyond loopback - the token gate is required on this bind")+
     posture(tokR,tokR?"Dashboard token is set - /api calls must carry it":("No dashboard token set"+(loop?" - acceptable on loopback only":"")))+
-    posture(true,"Fail-closed bind: a non-loopback bind without a token refuses to start");
+    posture(true,"Fail-closed bind: a non-loopback bind without a token refuses to start")+"</div>";
   sh+="<div class='seclabel'>Run it</div>"+
     "<p class='small'>Local (loopback, no token needed):</p><pre id='cmd-local'>PYTHONPATH=src python3 -m ghost_agent serve</pre>"+
     "<p><button type='button' class='ghostbtn small' onclick='copyCmd(\\"cmd-local\\")'>Copy</button></p>"+
@@ -1410,10 +1624,26 @@ def make_handler(store: Store, agent: Agent, token: str | None, host: str):
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            if path == "/assets/ghost-agent-icon.jpg":
+                # Public on purpose: the login screen and the header
+                # render before any token exists. A missing file is a
+                # plain 404; the page already falls back to the CSS
+                # tile in that case (see _brandmark_html).
+                try:
+                    data = ICON_PATH.read_bytes()
+                except OSError:
+                    return self._send(404, {"error": "icon not found"})
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == "/":
                 page = (PAGE
                         .replace("__WARNING__", WARNING if not token else WARNING_TOKEN)
                         .replace("__VERSION__", __version__)
+                        .replace("__BRANDMARK__", _brandmark_html())
                         .replace("__AUTH_REQUIRED__", "1" if token else "0"))
                 return self._send(200, page, "text/html; charset=utf-8")
             if path.startswith("/api/") and not self._require_auth():

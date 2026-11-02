@@ -1,3 +1,5 @@
+![Ghost Agent](assets/ghost-agent-icon.jpg)
+
 # Ghost Agent
 
 **A Hermes-style persistent, governed operator for Ghost Developer Studio.**
@@ -203,11 +205,32 @@ PYTHONPATH=src python3 -m pytest tests/test_sanity_gate.py -v      # v1 known-an
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v2.py -v   # v2 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v3.py -v   # v3 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v4.py -v   # v4 known-answer gate
+PYTHONPATH=src python3 -m pytest tests/test_sanity_gate_v5.py -v   # v5 known-answer gate
 PYTHONPATH=src python3 -m pytest tests/ -q                         # full suite
 ```
 
 See [BUILD_REPORT.md](BUILD_REPORT.md) (v1),
 [BUILD_REPORT_V2.md](BUILD_REPORT_V2.md) (v2),
-[BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3), and
-[BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4) for gate results and
+[BUILD_REPORT_V3.md](BUILD_REPORT_V3.md) (v3),
+[BUILD_REPORT_V4.md](BUILD_REPORT_V4.md) (v4), and
+[BUILD_REPORT_V5.md](BUILD_REPORT_V5.md) (v5) for gate results and
 counts.
+
+## Design language (v0.5.0)
+
+The dashboard wears the Trust Ladder design language: a deep-navy
+surface (#07030f family) with Ghost violet (#6716f3) accents, content
+grouped into rounded "shelves" whose border states meaning at a
+glance: solid green = trusted / done / healthy, DASHED amber =
+candidate / waiting / untrusted, solid violet = active, muted =
+neutral, red = failed. Cards are ranked, carry a text-glyph icon
+tile (WRITE, READ, MEM, SKILL - never emoji), and end in a
+provenance strip built only from fields that exist (model, step,
+status, source, permissions). Navigation is threefold: a grouped
+sidebar (Operate / Intelligence / System) on desktop, an All Apps
+drawer listing every page once, and a phone bottom bar (Home /
+Board / Agents / More) at 820px and under. The brand mark is Ryan's
+Ghost Agent icon (`assets/ghost-agent-icon.jpg`, served token-free
+so the login screen can show it; a CSS "G" tile takes its place if
+the file is ever missing). The reskin changed no API, payload, or
+behavior - see BUILD_REPORT_V5.md.
