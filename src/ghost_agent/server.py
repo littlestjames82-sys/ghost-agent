@@ -1762,7 +1762,7 @@ function toggleLogsPause(){
   logsPaused=!logsPaused;
   document.getElementById("log-pause").textContent=logsPaused?"Resume logs":"Pause logs";
   document.getElementById("log-paused-note").textContent=logsPaused?"(logs auto-refresh paused)":"";
-  if(!logsPaused) refresh();
+  if(!logsPaused) refresh(true);
 }
 function downloadLogs(){
   const shown=shownLogs();
@@ -1985,11 +1985,29 @@ function posture(ok,text){
   return "<div class='posture'>"+(ok?"<span class='badge b-done'>PASS</span>":"<span class='badge b-candidate'>WARN</span>")+
     "<span>"+esc(text)+"</span></div>";
 }
-async function refresh(){
+// Auto-refresh guard: the 5s poll used to rebuild every section
+// and re-run showPage(), which scrolls to the top, so any page
+// longer than the screen snapped back every few seconds. Now an
+// unchanged payload skips the rebuild entirely, and a changed
+// payload restores the reader's exact scroll position after the
+// render. refresh(true) forces a render (the logs unpause).
+let gaLastSig=null;
+function gaSig(parts){
+  let s="";
+  try{ s=JSON.stringify(parts) }catch(e){ s="" }
+  let h=0;
+  for(let i=0;i<s.length;i++){ h=((h*31)+s.charCodeAt(i))|0 }
+  return s.length+":"+h;
+}
+async function refresh(force){
   let ov,b,m,s,an,sys,ap,sc,ec;
   try{
     [ov,b,m,s,an,sys,ap,sc,ec]=await Promise.all([j("/api/overview"),j("/api/board"),j("/api/memory"),j("/api/skills"),j("/api/analytics"),j("/api/system"),j("/api/approvals"),j("/api/schedules"),j("/api/ecosystem")]);
   }catch(e){ return }
+  const sig=gaSig([ov,b,m,s,an,sys,ap,sc,ec]);
+  if(!force&&sig===gaLastSig) return;
+  gaLastSig=sig;
+  const gaScrollY=window.scrollY||0;
   lastBoard=b; lastMem=m; lastSkills=s; lastApprovals=ap.approvals||[];
   lastSchedules=sc.schedules||[]; lastEco=ec;
   // header + sidebar badges
@@ -2119,6 +2137,7 @@ async function refresh(){
   renderLogs();
   if(selectedTask){ detail(selectedTask) }
   showPage(curPage);
+  if(gaScrollY>0) window.scrollTo(0,gaScrollY);
 }
 document.getElementById("taskform").addEventListener("submit",async e=>{
   e.preventDefault();const g=document.getElementById("goal").value;
