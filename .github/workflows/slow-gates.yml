@@ -1,0 +1,20 @@
+name: Slow Gates
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install pytest
+      # The long sanity gates: real subprocess probes with real waits.
+      # Kept out of per-push CI (see ci.yml) and run weekly here.
+      - name: Sanity gates v9-v11
+        run: python -m pytest tests/test_sanity_gate_v9.py tests/test_sanity_gate_v10.py tests/test_sanity_gate_v11.py -q
