@@ -1,7 +1,7 @@
 ![Ghost Agent](assets/ghost-agent-icon.jpg)
 
 # Ghost Agent
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/littlestjames82-sys/ghost-agent)](https://github.com/littlestjames82-sys/ghost-agent/releases)
 
 **A Hermes-style persistent, governed operator for Ghost Developer Studio.**
 
